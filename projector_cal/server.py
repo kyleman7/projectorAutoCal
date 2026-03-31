@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
 
 _STATIC_DIR = Path(__file__).parent.parent / "static"
 _PROFILES_DIR = Path(__file__).parent.parent / "profiles"
+_AI_SETTINGS_PATH = Path(__file__).parent.parent / "configs" / "ai_settings.json"
 
 app = FastAPI(title="ProjectorCal", version="0.1.0")
 
@@ -58,6 +59,9 @@ class _ServerState:
         self._ws_clients: set[WebSocket] = set()
         self._event_queue: asyncio.Queue = asyncio.Queue()
         self._loop: asyncio.AbstractEventLoop | None = None
+        # AI agent settings — loaded from configs/ai_settings.json
+        self.ai_enabled: bool = False
+        self._ai_api_key: str = ""  # never exposed via API; only stored in memory + file
 
     def set_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         self._loop = loop
@@ -78,6 +82,36 @@ _state = _ServerState()
 # WebSocket broadcaster
 # ---------------------------------------------------------------------------
 
+def _load_ai_settings() -> None:
+    """Load AI settings from disk and apply to environment on startup."""
+    if not _AI_SETTINGS_PATH.exists():
+        return
+    try:
+        data = json.loads(_AI_SETTINGS_PATH.read_text())
+        _state.ai_enabled = bool(data.get("enabled", False))
+        key = data.get("api_key", "")
+        if key:
+            _state._ai_api_key = key
+            if _state.ai_enabled:
+                os.environ["ANTHROPIC_API_KEY"] = key
+        logger.info(
+            "AI settings loaded: enabled=%s key_set=%s",
+            _state.ai_enabled, bool(key),
+        )
+    except Exception as e:
+        logger.warning("Could not load AI settings: %s", e)
+
+
+def _save_ai_settings() -> None:
+    """Persist current AI settings to configs/ai_settings.json."""
+    _AI_SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    data = {
+        "enabled": _state.ai_enabled,
+        "api_key": _state._ai_api_key,
+    }
+    _AI_SETTINGS_PATH.write_text(json.dumps(data, indent=2))
+
+
 @app.on_event("startup")
 async def _startup() -> None:
     _state.set_loop(asyncio.get_event_loop())
@@ -86,6 +120,8 @@ async def _startup() -> None:
         _state.command_table = load_command_table()
     except ConfigError:
         _state.command_table = {}
+    # Load AI settings and apply env var
+    _load_ai_settings()
     asyncio.create_task(_ws_broadcaster())
 
 
@@ -496,6 +532,64 @@ async def test_connection(body: dict) -> dict:
             results = {"connected": False, "error": str(e)}
 
     return results
+
+
+# ---------------------------------------------------------------------------
+# AI settings
+# ---------------------------------------------------------------------------
+
+@app.get("/api/ai-settings")
+async def get_ai_settings() -> dict:
+    """Return current AI settings. Never returns the actual API key — only whether one is set."""
+    return {
+        "enabled": _state.ai_enabled,
+        "key_set": bool(_state._ai_api_key),
+        "key_preview": f"sk-ant-...{_state._ai_api_key[-4:]}" if _state._ai_api_key else None,
+    }
+
+
+class AISettingsRequest(BaseModel):
+    enabled: bool
+    api_key: str = ""  # empty string = don't change existing key
+
+
+@app.post("/api/ai-settings")
+async def update_ai_settings(body: AISettingsRequest) -> dict:
+    """Save AI feature toggle and optionally update the API key.
+
+    If api_key is an empty string, the existing stored key is preserved.
+    Setting enabled=False removes ANTHROPIC_API_KEY from the environment
+    so agents degrade gracefully without crashing.
+    """
+    # Only overwrite the stored key if a new non-empty one was submitted
+    if body.api_key:
+        _state._ai_api_key = body.api_key.strip()
+
+    _state.ai_enabled = body.enabled
+
+    if _state.ai_enabled and _state._ai_api_key:
+        os.environ["ANTHROPIC_API_KEY"] = _state._ai_api_key
+        logger.info("AI features enabled")
+    else:
+        os.environ.pop("ANTHROPIC_API_KEY", None)
+        if not _state.ai_enabled:
+            logger.info("AI features disabled")
+        elif not _state._ai_api_key:
+            logger.warning("AI features enabled but no API key is set")
+
+    _save_ai_settings()
+
+    _state.broadcast_event({
+        "event": "ai_settings_changed",
+        "enabled": _state.ai_enabled,
+        "key_set": bool(_state._ai_api_key),
+    })
+
+    return {
+        "ok": True,
+        "enabled": _state.ai_enabled,
+        "key_set": bool(_state._ai_api_key),
+    }
 
 
 # ---------------------------------------------------------------------------
