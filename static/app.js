@@ -151,6 +151,10 @@ function handleEvent(ev) {
     case 'profile_applied':
       logLine(`Profile '${ev.profile}' applied to projector`, 'log-info');
       break;
+
+    case 'ai_settings_changed':
+      handleAISettingsChanged(ev);
+      break;
   }
 }
 
@@ -660,11 +664,81 @@ function v(id) {
 }
 
 // ---------------------------------------------------------------------------
+// AI Settings
+// ---------------------------------------------------------------------------
+
+async function loadAISettings() {
+  try {
+    const res  = await fetch('/api/ai-settings');
+    const data = await res.json();
+    document.getElementById('ai-enabled-toggle').checked = data.enabled;
+    document.getElementById('ai-key-preview').textContent =
+      data.key_preview ? data.key_preview : '';
+    updateAIBadge(data.enabled, data.key_set);
+  } catch (e) {
+    // server may not be ready yet — silently ignore
+  }
+}
+
+function updateAIBadge(enabled, keySet) {
+  const badge = document.getElementById('ai-status-badge');
+  if (enabled && keySet) {
+    badge.textContent = 'Active ✓';
+    badge.className = 'badge badge-ok';
+  } else if (keySet && !enabled) {
+    badge.textContent = 'Key saved — disabled';
+    badge.className = 'badge badge-warn';
+  } else {
+    badge.textContent = 'Not configured';
+    badge.className = 'badge badge-warn';
+  }
+}
+
+function onAIToggle(checked) {
+  // Optimistic UI update — actual save happens on "Save" click
+  const badge = document.getElementById('ai-status-badge');
+  if (!checked) {
+    badge.textContent = 'Disabled';
+    badge.className = 'badge badge-warn';
+  }
+}
+
+async function saveAISettings() {
+  const enabled = document.getElementById('ai-enabled-toggle').checked;
+  const apiKey  = document.getElementById('ai-api-key').value.trim();
+
+  const res = await fetch('/api/ai-settings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled, api_key: apiKey }),
+  });
+  const data = await res.json();
+
+  // Clear the input field after saving (key is now in server memory)
+  document.getElementById('ai-api-key').value = '';
+  updateAIBadge(data.enabled, data.key_set);
+  document.getElementById('ai-key-preview').textContent =
+    data.key_set ? '(key saved)' : '';
+}
+
+function toggleKeyVisibility() {
+  const inp = document.getElementById('ai-api-key');
+  inp.type = inp.type === 'password' ? 'text' : 'password';
+}
+
+// Handle ai_settings_changed event from WebSocket
+function handleAISettingsChanged(ev) {
+  document.getElementById('ai-enabled-toggle').checked = ev.enabled;
+  updateAIBadge(ev.enabled, ev.key_set);
+}
+
+// ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
 
 initPatchGrid();
 connectWS();
+loadAISettings();
 
 // Load last discovery results on startup
 fetch('/api/discover/last').then(r => r.json()).then(data => {

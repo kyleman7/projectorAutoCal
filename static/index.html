@@ -31,6 +31,45 @@
     ================================================================ -->
     <div id="view-setup" class="view active">
 
+      <!-- AI Settings -->
+      <div class="card ai-card">
+        <div class="flex justify-between align-center mb-16">
+          <div class="card-title" style="margin:0">AI Agent Features</div>
+          <label class="toggle-switch" title="Enable/disable Claude AI agents">
+            <input type="checkbox" id="ai-enabled-toggle" onchange="onAIToggle(this.checked)">
+            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+          </label>
+        </div>
+
+        <div id="ai-key-row" class="field">
+          <label>Anthropic API Key
+            <a href="https://console.anthropic.com/settings/keys" target="_blank"
+               style="color:var(--accent); font-size:11px; margin-left:6px; text-decoration:none">
+              Get key ↗
+            </a>
+          </label>
+          <div class="flex gap-8 align-center">
+            <input id="ai-api-key" type="password" placeholder="sk-ant-api03-..."
+                   style="flex:1" autocomplete="off">
+            <button class="btn btn-sm" onclick="toggleKeyVisibility()" id="key-vis-btn"
+                    title="Show/hide key">👁</button>
+          </div>
+        </div>
+
+        <div class="flex gap-8 align-center mt-8">
+          <button class="btn" onclick="saveAISettings()">Save</button>
+          <span id="ai-status-badge" class="badge badge-warn">Not configured</span>
+          <span id="ai-key-preview" class="text-dim text-mono" style="font-size:11px"></span>
+        </div>
+
+        <div class="mt-8 text-dim" style="font-size:12px; line-height:1.6">
+          When enabled: post-run analysis, live anomaly detection, profile comparison,
+          and setup validation use Claude. Disabled = full calibration still works,
+          AI cards show a graceful fallback. Key is stored locally and never sent
+          anywhere except Anthropic's API.
+        </div>
+      </div>
+
       <!-- Step 1: Connections -->
       <div class="card">
         <div class="step-header">
