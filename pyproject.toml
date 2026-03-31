@@ -18,10 +18,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+serial = [
+    "pyserial>=3.5",
+]
 dev = [
     "pytest>=7.4.0",
     "pytest-mock>=3.11.0",
     "httpx>=0.27.0",
+    "pyserial>=3.5",
 ]
 
 [project.scripts]

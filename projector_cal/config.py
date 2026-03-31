@@ -20,19 +20,33 @@ class ConfigError(Exception):
 
 @dataclass
 class ProjectorConfig:
-    host: str
+    host: str = "192.168.1.100"
     port: int = 3629
     connection_timeout: float = 5.0
     command_timeout: float = 2.0
     command_settle_ms: int = 200
+    # Transport selection
+    transport: Literal["tcp", "serial"] = "tcp"
+    serial_port: str = "/dev/ttyUSB0"
+    serial_baud: int = 9600
 
     def __post_init__(self) -> None:
-        if not self.host:
-            raise ConfigError("projector.host is required")
-        if not (1 <= self.port <= 65535):
-            raise ConfigError(f"projector.port must be 1–65535, got {self.port}")
-        if self.connection_timeout <= 0:
-            raise ConfigError("projector.connection_timeout must be positive")
+        if self.transport not in ("tcp", "serial"):
+            raise ConfigError("projector.transport must be 'tcp' or 'serial'")
+        if self.transport == "tcp":
+            if not self.host:
+                raise ConfigError("projector.host is required when transport is 'tcp'")
+            if not (1 <= self.port <= 65535):
+                raise ConfigError(f"projector.port must be 1–65535, got {self.port}")
+            if self.connection_timeout <= 0:
+                raise ConfigError("projector.connection_timeout must be positive")
+        if self.transport == "serial":
+            if not self.serial_port:
+                raise ConfigError("projector.serial_port is required when transport is 'serial'")
+            if self.serial_baud not in (1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200):
+                raise ConfigError(
+                    f"projector.serial_baud {self.serial_baud} is not a standard baud rate"
+                )
         if self.command_timeout <= 0:
             raise ConfigError("projector.command_timeout must be positive")
         if self.command_settle_ms < 0:
@@ -185,11 +199,14 @@ def load_config(path: str | None = None) -> Config:
     try:
         proj_raw = data.get("projector", {})
         proj = ProjectorConfig(
-            host=proj_raw.get("host", ""),
+            host=proj_raw.get("host", "192.168.1.100"),
             port=int(proj_raw.get("port", 3629)),
             connection_timeout=float(proj_raw.get("connection_timeout", 5.0)),
             command_timeout=float(proj_raw.get("command_timeout", 2.0)),
             command_settle_ms=int(proj_raw.get("command_settle_ms", 200)),
+            transport=proj_raw.get("transport", "tcp"),
+            serial_port=proj_raw.get("serial_port", "/dev/ttyUSB0"),
+            serial_baud=int(proj_raw.get("serial_baud", 9600)),
         )
 
         col_raw = data.get("colorimeter", {})

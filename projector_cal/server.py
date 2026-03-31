@@ -160,12 +160,7 @@ async def run_probe() -> dict:
         from .config import _DEFAULT_COMMAND_TABLE_PATH
         cfg = _state.config.projector
         try:
-            with ProjectorClient(
-                host=cfg.host,
-                port=cfg.port,
-                connection_timeout=cfg.connection_timeout,
-                command_timeout=cfg.command_timeout,
-            ) as proj:
+            with ProjectorClient.from_config(cfg) as proj:
                 result = _probe(
                     proj,
                     progress_cb=lambda msg: _state.broadcast_event({"event": "probe_progress", "message": msg}),
@@ -205,13 +200,8 @@ async def start_run(body: RunRequest) -> dict:
         cal_cfg = _state.config.calibration
 
         try:
-            projector = ProjectorClient(
-                host=proj_cfg.host,
-                port=proj_cfg.port,
-                connection_timeout=proj_cfg.connection_timeout,
-                command_timeout=proj_cfg.command_timeout,
-                command_settle_ms=proj_cfg.command_settle_ms,
-                command_table=_state.command_table,
+            projector = ProjectorClient.from_config(
+                proj_cfg, command_table=_state.command_table
             )
             projector.connect()
 
@@ -335,13 +325,7 @@ class SaveProfileRequest(BaseModel):
 async def save_current_profile(body: SaveProfileRequest) -> dict:
     proj_cfg = _state.config.projector
     try:
-        with ProjectorClient(
-            host=proj_cfg.host,
-            port=proj_cfg.port,
-            connection_timeout=proj_cfg.connection_timeout,
-            command_timeout=proj_cfg.command_timeout,
-            command_table=_state.command_table,
-        ) as proj:
+        with ProjectorClient.from_config(proj_cfg, command_table=_state.command_table) as proj:
             profile = profile_from_projector(
                 name=body.name,
                 mode=body.mode,
@@ -375,13 +359,7 @@ async def apply_profile_endpoint(filename: str) -> dict:
 
     proj_cfg = _state.config.projector
     try:
-        with ProjectorClient(
-            host=proj_cfg.host,
-            port=proj_cfg.port,
-            connection_timeout=proj_cfg.connection_timeout,
-            command_timeout=proj_cfg.command_timeout,
-            command_table=_state.command_table,
-        ) as proj:
+        with ProjectorClient.from_config(proj_cfg, command_table=_state.command_table) as proj:
             apply_profile(profile, proj)
             _state.broadcast_event({"event": "profile_applied", "profile": profile.name})
             return {"ok": True}
@@ -478,24 +456,47 @@ async def validate_setup_endpoint(body: dict) -> dict:
 @app.post("/api/test-connection")
 async def test_connection(body: dict) -> dict:
     device_type = body.get("type", "projector")
+    transport = body.get("transport", "tcp")
     ip = body.get("ip", "")
     port = int(body.get("port", 3629))
-    results: dict = {}
+    serial_port = body.get("serial_port", "/dev/ttyUSB0")
+    serial_baud = int(body.get("serial_baud", 9600))
 
     if device_type == "projector":
         try:
-            with ProjectorClient(host=ip, port=port, connection_timeout=3.0, command_timeout=2.0) as proj:
-                results = {"connected": True, "ip": ip, "port": port}
+            if transport == "serial":
+                proj = ProjectorClient.from_serial(
+                    port=serial_port, baud=serial_baud, command_timeout=3.0
+                )
+            else:
+                proj = ProjectorClient.from_tcp(
+                    host=ip, port=port, connection_timeout=3.0, command_timeout=2.0
+                )
+            with proj:
+                if transport == "serial":
+                    return {"connected": True, "transport": "serial", "port": serial_port}
+                return {"connected": True, "transport": "tcp", "ip": ip, "port": port}
         except ProjectorError as e:
-            results = {"connected": False, "error": str(e)}
+            return {"connected": False, "error": str(e)}
     elif device_type == "pgen":
         try:
-            with PGenClient(host=ip, port=port, connection_timeout=3.0) as pg:
-                results = {"connected": True, "ip": ip, "port": port}
+            with PGenClient(host=ip, port=port, connection_timeout=3.0):
+                return {"connected": True, "ip": ip, "port": port}
         except Exception as e:
-            results = {"connected": False, "error": str(e)}
+            return {"connected": False, "error": str(e)}
 
-    return results
+    return {"connected": False, "error": "Unknown device type"}
+
+
+@app.get("/api/serial-ports")
+async def get_serial_ports() -> list[dict]:
+    """Return available serial ports on the host machine.
+
+    Used by the Setup tab to populate the serial port dropdown.
+    Returns empty list if pyserial is not installed.
+    """
+    from .projector import list_serial_ports
+    return list_serial_ports()
 
 
 # ---------------------------------------------------------------------------

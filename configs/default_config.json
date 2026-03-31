@@ -1,10 +1,13 @@
 {
   "projector": {
+    "transport": "tcp",
     "host": "192.168.1.100",
     "port": 3629,
     "connection_timeout": 5.0,
     "command_timeout": 2.0,
-    "command_settle_ms": 200
+    "command_settle_ms": 200,
+    "serial_port": "/dev/ttyUSB0",
+    "serial_baud": 9600
   },
   "colorimeter": {
     "spotread_path": "spotread",

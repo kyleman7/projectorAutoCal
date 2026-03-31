@@ -38,14 +38,54 @@
           <div class="step-title">Device Connections</div>
         </div>
 
-        <div class="field-row">
-          <div class="field">
-            <label>Projector IP</label>
-            <input id="proj-ip" type="text" placeholder="192.168.1.100">
+        <div class="field">
+          <label>Projector Connection</label>
+          <div class="flex gap-8" style="margin-top:4px">
+            <label style="cursor:pointer; display:flex; align-items:center; gap:6px">
+              <input type="radio" name="proj-transport" value="tcp" checked onchange="setTransport('tcp')"> TCP (Network)
+            </label>
+            <label style="cursor:pointer; display:flex; align-items:center; gap:6px">
+              <input type="radio" name="proj-transport" value="serial" onchange="setTransport('serial')"> RS-232 (Serial)
+            </label>
           </div>
-          <div class="field">
-            <label>Projector Port</label>
-            <input id="proj-port" type="number" value="3629">
+        </div>
+
+        <div id="tcp-fields">
+          <div class="field-row">
+            <div class="field">
+              <label>Projector IP</label>
+              <input id="proj-ip" type="text" placeholder="192.168.1.100">
+            </div>
+            <div class="field">
+              <label>Projector Port</label>
+              <input id="proj-port" type="number" value="3629">
+            </div>
+          </div>
+        </div>
+
+        <div id="serial-fields" class="hidden">
+          <div class="field-row">
+            <div class="field">
+              <label>Serial Port</label>
+              <select id="serial-port-select" style="flex:1">
+                <option value="/dev/ttyUSB0">/dev/ttyUSB0</option>
+                <option value="/dev/ttyUSB1">/dev/ttyUSB1</option>
+                <option value="/dev/cu.usbserial-0001">/dev/cu.usbserial-0001</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>Baud Rate</label>
+              <select id="serial-baud">
+                <option value="9600" selected>9600 (5040UB default)</option>
+                <option value="19200">19200</option>
+                <option value="38400">38400</option>
+              </select>
+            </div>
+          </div>
+          <div class="text-dim mt-8" style="font-size:12px">
+            Connect the projector's RS-232C port (D-Sub 9-pin) to your machine via a USB-to-serial adapter.
+            FTDI-based adapters (FT232R) are recommended. On macOS the port appears as
+            <code>/dev/cu.usbserial-XXXXXXXX</code>.
           </div>
         </div>
 
