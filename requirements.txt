@@ -6,6 +6,9 @@ anthropic>=0.34.0
 zeroconf>=0.131.0
 netifaces>=0.11.0
 
+# optional: RS-232 transport
+pyserial>=3.5
+
 # dev/test
 pytest>=7.4.0
 pytest-mock>=3.11.0

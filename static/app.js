@@ -159,13 +159,51 @@ function handleEvent(ev) {
 }
 
 // ---------------------------------------------------------------------------
+// Setup — Transport toggle
+// ---------------------------------------------------------------------------
+
+function setTransport(mode) {
+  document.getElementById('tcp-fields').classList.toggle('hidden', mode !== 'tcp');
+  document.getElementById('serial-fields').classList.toggle('hidden', mode !== 'serial');
+  if (mode === 'serial') loadSerialPorts();
+}
+
+async function loadSerialPorts() {
+  try {
+    const res = await fetch('/api/serial-ports');
+    const ports = await res.json();
+    const sel = document.getElementById('serial-port-select');
+    if (ports.length) {
+      sel.innerHTML = ports.map(p =>
+        `<option value="${p.port}">${p.port} — ${p.description}</option>`
+      ).join('');
+    }
+  } catch (e) {
+    // leave defaults
+  }
+}
+
+function getTransport() {
+  return document.querySelector('input[name="proj-transport"]:checked').value;
+}
+
+// ---------------------------------------------------------------------------
 // Setup — Connections
 // ---------------------------------------------------------------------------
 
 async function testConnections() {
+  const transport = getTransport();
   const checks = [
-    { label: 'Projector', type: 'projector', ip: v('proj-ip'), port: v('proj-port') },
-    { label: 'PGenerator', type: 'pgen',      ip: v('pgen-ip'), port: v('pgen-port') },
+    {
+      label: transport === 'serial'
+        ? `Projector (serial: ${v('serial-port-select')})`
+        : `Projector (TCP: ${v('proj-ip')}:${v('proj-port')})`,
+      type: 'projector',
+      transport,
+      ip: v('proj-ip'), port: v('proj-port'),
+      serial_port: v('serial-port-select'), serial_baud: v('serial-baud'),
+    },
+    { label: 'PGenerator', type: 'pgen', transport: 'tcp', ip: v('pgen-ip'), port: v('pgen-port') },
   ];
 
   const ul = document.getElementById('conn-checklist');
@@ -181,7 +219,14 @@ async function testConnections() {
       const res = await fetch('/api/test-connection', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type: c.type, ip: c.ip, port: parseInt(c.port) }),
+        body: JSON.stringify({
+          type: c.type,
+          transport: c.transport || 'tcp',
+          ip: c.ip,
+          port: parseInt(c.port),
+          serial_port: c.serial_port || '/dev/ttyUSB0',
+          serial_baud: parseInt(c.serial_baud || 9600),
+        }),
       });
       const data = await res.json();
       li.querySelector('.check-icon').textContent = data.connected ? '✅' : '❌';
@@ -332,9 +377,14 @@ async function validateSetup() {
 
   // Quick connection checks
   try {
+    const transport = getTransport();
     const r1 = await fetch('/api/test-connection', {
       method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ type: 'projector', ip: v('proj-ip'), port: parseInt(v('proj-port')) }),
+      body: JSON.stringify({
+        type: 'projector', transport,
+        ip: v('proj-ip'), port: parseInt(v('proj-port')),
+        serial_port: v('serial-port-select'), serial_baud: parseInt(v('serial-baud')),
+      }),
     });
     body.projector_connected = (await r1.json()).connected;
   } catch {}
