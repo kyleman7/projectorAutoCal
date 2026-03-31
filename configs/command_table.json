@@ -1,0 +1,20 @@
+{
+  "_note": "Placeholder command tokens. Run --probe from the web UI to auto-discover the correct tokens for your 5040UB.",
+  "white_balance": {
+    "R": "WBALGAINR",
+    "G": "WBALGAING",
+    "B": "WBALGAINB"
+  },
+  "picture_mode": {
+    "sdr": "CINEMA",
+    "hdr10": "HDR4"
+  },
+  "cms": {
+    "red":     { "HUE": "CMSRHUE", "SAT": "CMSRSAT", "LUM": "CMSRLUM" },
+    "green":   { "HUE": "CMSGHUE", "SAT": "CMSGSAT", "LUM": "CMSGLUM" },
+    "blue":    { "HUE": "CMSBHUE", "SAT": "CMSBSAT", "LUM": "CMSBLUM" },
+    "cyan":    { "HUE": "CMSCHUE", "SAT": "CMSCSAT", "LUM": "CMSCLUM" },
+    "magenta": { "HUE": "CMSMHUE", "SAT": "CMSMSAT", "LUM": "CMSMLUM" },
+    "yellow":  { "HUE": "CMSYHUE", "SAT": "CMSYSAT", "LUM": "CMSYLUM" }
+  }
+}

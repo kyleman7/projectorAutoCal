@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ProjectorCal — Epson 5040UB Calibration</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- Header -->
+  <header>
+    <h1>ProjectorCal</h1>
+    <span id="ws-status">Disconnected</span>
+  </header>
+
+  <!-- Tab bar -->
+  <nav>
+    <button class="active" data-view="setup">Setup</button>
+    <button data-view="run">Run</button>
+    <button data-view="results">Before / After</button>
+    <button data-view="profiles">Profiles</button>
+  </nav>
+
+  <!-- Main content -->
+  <main>
+
+    <!-- ================================================================
+         VIEW: Setup Wizard
+    ================================================================ -->
+    <div id="view-setup" class="view active">
+
+      <!-- Step 1: Connections -->
+      <div class="card">
+        <div class="step-header">
+          <div class="step-number">1</div>
+          <div class="step-title">Device Connections</div>
+        </div>
+
+        <div class="field-row">
+          <div class="field">
+            <label>Projector IP</label>
+            <input id="proj-ip" type="text" placeholder="192.168.1.100">
+          </div>
+          <div class="field">
+            <label>Projector Port</label>
+            <input id="proj-port" type="number" value="3629">
+          </div>
+        </div>
+
+        <div class="field-row">
+          <div class="field">
+            <label>PGenerator (Pi) IP</label>
+            <input id="pgen-ip" type="text" placeholder="192.168.1.101">
+          </div>
+          <div class="field">
+            <label>PGenerator Port</label>
+            <input id="pgen-port" type="number" value="85">
+          </div>
+        </div>
+
+        <div class="field">
+          <label>spotread path</label>
+          <input id="spotread-path" type="text" value="spotread">
+        </div>
+
+        <div class="flex gap-8 mt-16">
+          <button class="btn" onclick="testConnections()">Test All</button>
+          <button class="btn" onclick="startDiscovery()">Scan Network</button>
+        </div>
+
+        <!-- Discovery results -->
+        <div id="discovery-status" class="mt-16 hidden">
+          <div class="text-dim mb-8" id="discovery-msg">Scanning…</div>
+          <div id="device-list" class="device-list"></div>
+        </div>
+
+        <!-- Connection test results -->
+        <div id="conn-results" class="mt-16 hidden">
+          <ul class="checklist" id="conn-checklist"></ul>
+        </div>
+      </div>
+
+      <!-- Step 2: Screen Info -->
+      <div class="card">
+        <div class="step-header">
+          <div class="step-number">2</div>
+          <div class="step-title">Screen Information</div>
+        </div>
+
+        <div class="field-row">
+          <div class="field">
+            <label>Screen Size (diagonal, inches)</label>
+            <input id="screen-size" type="number" placeholder="120">
+          </div>
+          <div class="field">
+            <label>Throw Distance (feet)</label>
+            <input id="throw-dist" type="number" step="0.5" placeholder="12.0">
+          </div>
+        </div>
+
+        <div class="field">
+          <label>Screen Material</label>
+          <select id="screen-material">
+            <option>White Matte</option>
+            <option>Grey</option>
+            <option>Silver</option>
+            <option>ALR (Ambient Light Rejecting)</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Step 3: Colorimeter Placement -->
+      <div class="card">
+        <div class="step-header">
+          <div class="step-number">3</div>
+          <div class="step-title">Colorimeter Placement (CCDIS3)</div>
+        </div>
+
+        <ul class="checklist">
+          <li>
+            <span class="check-icon">⚪</span>
+            <div>
+              <div>Remove the white diffuser lens cap from the CCDIS3</div>
+              <div class="check-note">The CCDIS3 has a projector measurement mode — it does NOT use the suction-cup flush contact method. The lens must be uncapped to receive projected light.</div>
+            </div>
+          </li>
+          <li>
+            <span class="check-icon">⚪</span>
+            <div>
+              <div>Mount colorimeter on a tripod, centered on screen</div>
+              <div class="check-note">Position horizontally and vertically centered on the projected image area. Typical distance: 6–18 inches from the screen surface. Aim the sensor face directly at the screen.</div>
+            </div>
+          </li>
+          <li>
+            <span class="check-icon">⚪</span>
+            <div>
+              <div>Ensure no direct ambient light hits the sensor face from the side</div>
+              <div class="check-note">Side-angle ambient light creates stray light contamination that skews chromaticity readings. Shield the sensor from room lights if needed.</div>
+            </div>
+          </li>
+          <li>
+            <span class="check-icon">⚪</span>
+            <div>
+              <div>Dim or turn off all room lights</div>
+              <div class="check-note">Ambient light adds to the projected image luminance. For accurate black/grey measurements, the room should be as dark as possible.</div>
+            </div>
+          </li>
+          <li>
+            <span class="check-icon" id="placement-check">⚪</span>
+            <div>
+              <div>
+                <input type="checkbox" id="placement-confirm" onchange="document.getElementById('placement-check').textContent = this.checked ? '✅' : '⚪'">
+                <label for="placement-confirm" style="display:inline; cursor:pointer;">
+                  Colorimeter is positioned on tripod, aimed at screen center, room is darkened
+                </label>
+              </div>
+            </div>
+          </li>
+        </ul>
+      </div>
+
+      <!-- Step 4: Warm-up Monitor -->
+      <div class="card">
+        <div class="step-header">
+          <div class="step-number">4</div>
+          <div class="step-title">Projector Warm-up</div>
+          <span id="warmup-badge" class="badge badge-warn ml-auto" style="margin-left:auto">Warming Up</span>
+        </div>
+
+        <p class="text-dim mb-16" style="font-size:13px">
+          Allow the projector to warm up for at least 30 minutes for stable color measurements.
+          Calibration unlocks when Y luminance variance drops below 0.5% over 3 consecutive readings.
+        </p>
+
+        <div id="warmup-chart"></div>
+        <div id="warmup-info" class="text-dim" style="font-size:12px; font-family:var(--mono)">
+          No readings yet — click Start Monitoring
+        </div>
+
+        <div class="flex gap-8 mt-16">
+          <button class="btn" id="warmup-btn" onclick="toggleWarmup()">Start Monitoring</button>
+          <button class="btn btn-success" id="validate-btn" onclick="validateSetup()">Validate Setup</button>
+        </div>
+
+        <!-- Setup validation checklist -->
+        <div id="validation-result" class="mt-16 hidden">
+          <ul class="checklist" id="validation-checklist"></ul>
+          <div id="validation-blocking" class="mt-8"></div>
+        </div>
+      </div>
+
+      <!-- Step 4: Probe -->
+      <div class="card">
+        <div class="step-header">
+          <div class="step-number">★</div>
+          <div class="step-title">Command Table (First Run Only)</div>
+        </div>
+        <p class="text-dim mb-16" style="font-size:13px">
+          Run the probe once to auto-discover the ESC/VP21 command tokens for your specific
+          5040UB firmware. Results are saved to <code>configs/command_table.json</code>.
+        </p>
+        <button class="btn" onclick="runProbe()">Run Probe</button>
+        <div id="probe-output" class="log mt-16 hidden"></div>
+      </div>
+
+    </div><!-- /setup view -->
+
+
+    <!-- ================================================================
+         VIEW: Run Dashboard
+    ================================================================ -->
+    <div id="view-run" class="view">
+
+      <div class="card">
+        <div class="flex align-center gap-16 mb-16">
+          <div class="field" style="flex:1; margin:0">
+            <label>Mode</label>
+            <select id="run-mode">
+              <option value="sdr">SDR (Rec.709)</option>
+              <option value="hdr10">HDR10 (P3-D65)</option>
+            </select>
+          </div>
+          <div class="field" style="flex:1; margin:0">
+            <label>Phase</label>
+            <select id="run-phase">
+              <option value="all">All (WB + CMS + Verify)</option>
+              <option value="wb">White Balance Only</option>
+              <option value="cms">CMS Only</option>
+            </select>
+          </div>
+          <div class="field" style="flex:1; margin:0">
+            <label>&nbsp;</label>
+            <label style="cursor:pointer; padding:8px 0">
+              <input type="checkbox" id="dry-run"> Dry Run (no corrections sent)
+            </label>
+          </div>
+          <div style="flex-shrink:0; display:flex; gap:8px; align-items:flex-end; padding-bottom:1px">
+            <button class="btn btn-success" id="start-btn" onclick="startRun()">Start</button>
+            <button class="btn btn-danger hidden" id="stop-btn" onclick="stopRun()">Stop</button>
+          </div>
+        </div>
+
+        <!-- Progress -->
+        <div id="run-progress-wrap" class="hidden">
+          <div class="flex justify-between mb-8" style="font-size:12px; color:var(--text-dim)">
+            <span id="run-phase-label">Phase: —</span>
+            <span id="run-progress-label">0 / 0 patches</span>
+          </div>
+          <div class="progress-bar"><div class="progress-fill" id="run-progress-fill" style="width:0%"></div></div>
+        </div>
+      </div>
+
+      <!-- Patch grid -->
+      <div class="card">
+        <div class="card-title">Patch Status</div>
+        <div class="patch-grid" id="patch-grid"></div>
+      </div>
+
+      <!-- Live log -->
+      <div class="card">
+        <div class="card-title">Live Log</div>
+        <div class="log" id="run-log"></div>
+      </div>
+
+    </div><!-- /run view -->
+
+
+    <!-- ================================================================
+         VIEW: Before / After
+    ================================================================ -->
+    <div id="view-results" class="view">
+
+      <div class="card">
+        <div class="flex justify-between align-center mb-16">
+          <div class="card-title" style="margin:0">Calibration Results</div>
+          <button class="btn btn-sm" onclick="downloadResults()">Download JSON</button>
+        </div>
+
+        <table>
+          <thead>
+            <tr>
+              <th>Patch</th>
+              <th>Before ΔE</th>
+              <th>After ΔE</th>
+              <th>Improvement</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="results-table-body">
+            <tr><td colspan="5" class="text-dim" style="text-align:center; padding:24px">
+              Run a calibration to see results
+            </td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- AI Analysis -->
+      <div class="card ai-card" id="ai-analysis-card">
+        <div class="card-title">AI Analysis</div>
+        <div id="ai-analysis-content">
+          <div class="text-dim" style="font-size:13px">Analysis will appear after calibration completes.</div>
+        </div>
+      </div>
+
+    </div><!-- /results view -->
+
+
+    <!-- ================================================================
+         VIEW: Profiles
+    ================================================================ -->
+    <div id="view-profiles" class="view">
+
+      <div class="card">
+        <div class="flex justify-between align-center mb-16">
+          <div class="card-title" style="margin:0">Saved Profiles</div>
+          <div class="flex gap-8">
+            <button class="btn btn-sm" onclick="saveCurrentProfile()">Save Current State</button>
+            <button class="btn btn-sm" onclick="loadProfiles()">Refresh</button>
+          </div>
+        </div>
+
+        <div id="profiles-list">
+          <div class="text-dim" style="font-size:13px; padding:16px 0">No profiles saved yet.</div>
+        </div>
+      </div>
+
+      <!-- Profile comparison -->
+      <div class="card" id="compare-card" style="display:none">
+        <div class="card-title">Profile Comparison</div>
+        <div id="compare-result"></div>
+      </div>
+
+    </div><!-- /profiles view -->
+
+  </main>
+</div><!-- /#app -->
+
+<script src="/static/app.js"></script>
+</body>
+</html>

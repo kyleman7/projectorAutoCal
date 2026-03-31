@@ -1,0 +1,35 @@
+{
+  "projector": {
+    "host": "192.168.1.100",
+    "port": 3629,
+    "connection_timeout": 5.0,
+    "command_timeout": 2.0,
+    "command_settle_ms": 200
+  },
+  "colorimeter": {
+    "spotread_path": "spotread",
+    "display_index": 1,
+    "measurement_retries": 3,
+    "measurement_timeout": 30.0
+  },
+  "pgen": {
+    "host": "192.168.1.101",
+    "port": 85,
+    "patch_settle_ms": 500
+  },
+  "calibration": {
+    "delta_e_threshold": 1.0,
+    "max_iterations_per_patch": 20,
+    "wb_gain_center": 128,
+    "wb_gain_range": [0, 255],
+    "proportional_gain_initial": 0.8,
+    "proportional_gain_minimum": 0.1,
+    "cms_axis_order": ["red", "green", "blue", "cyan", "magenta", "yellow"]
+  },
+  "hdr": {
+    "picture_mode_command": "PMOD",
+    "hdr10_mode_value": "HDR4",
+    "mode_switch_settle_ms": 3000
+  },
+  "log_level": "INFO"
+}
