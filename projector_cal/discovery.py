@@ -273,22 +273,22 @@ class NetworkDiscovery:
                 except Exception:
                     pass
 
-        # Verify open candidates
+        # Verify open candidates; unconfirmed devices are kept too (port was
+        # open) so the user can inspect them in the UI.
         devices: list[DiscoveredDevice] = []
         for ip, port, dtype in open_candidates:
             if dtype == "projector":
                 confirmed, hostname = self._verify_projector(ip, port)
             else:
                 confirmed, hostname = self._verify_pgen(ip, port)
-            if confirmed or True:  # include unconfirmed too (port was open)
-                devices.append(DiscoveredDevice(
-                    device_type=dtype,
-                    ip=ip,
-                    port=port,
-                    hostname=hostname,
-                    method="port_scan",
-                    confirmed=confirmed,
-                ))
+            devices.append(DiscoveredDevice(
+                device_type=dtype,
+                ip=ip,
+                port=port,
+                hostname=hostname,
+                method="port_scan",
+                confirmed=confirmed,
+            ))
 
         return devices
 

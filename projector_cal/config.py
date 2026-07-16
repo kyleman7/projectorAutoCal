@@ -196,6 +196,20 @@ def load_config(path: str | None = None) -> Config:
             raise ConfigError(f"Invalid JSON in config file '{path}': {e}") from e
         data = _deep_merge(data, user_data)
 
+    return _build_config(data)
+
+
+def load_config_from_dict(overrides: dict) -> Config:
+    """Merge an in-memory config dict into the built-in defaults and validate.
+
+    Used by the web UI's POST /api/config so updates don't round-trip through
+    a temp file.
+    """
+    return _build_config(_deep_merge(_load_defaults(), overrides or {}))
+
+
+def _build_config(data: dict) -> Config:
+    """Construct and validate a Config from a fully-merged dict."""
     try:
         proj_raw = data.get("projector", {})
         proj = ProjectorConfig(

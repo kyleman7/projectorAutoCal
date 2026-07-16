@@ -78,7 +78,7 @@ def main() -> None:
     # Print access URLs
     local_ip = _get_local_ip()
     print()
-    print("  ProjectorCal is starting…")
+    print("  ProjectorCal is starting...")
     print()
     if args.host == "0.0.0.0":
         print(f"  Open http://{local_ip}:{args.port} in your browser")
@@ -86,7 +86,7 @@ def main() -> None:
     else:
         print(f"  Open http://{args.host}:{args.port} in your browser")
     print()
-    print("  Setup wizard → Run probe → Warm-up → Calibrate → Profiles")
+    print("  Setup wizard -> Run probe -> Warm-up -> Calibrate -> Profiles")
     print()
 
     # Start uvicorn

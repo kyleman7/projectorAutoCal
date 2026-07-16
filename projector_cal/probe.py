@@ -102,9 +102,8 @@ class ProbeResult:
     def to_command_table(self) -> dict:
         """Serialize to command_table.json schema.
 
-        Only includes slots where a token was found. Missing slots retain the
-        placeholder names from the default command_table.json so the user can
-        fill them in manually if needed.
+        Only includes slots where a token was found; unresolved slots are left
+        out so the user can fill them in manually if needed.
         """
         table: dict = {"white_balance": {}, "picture_mode": {}, "cms": {}}
 
@@ -113,10 +112,12 @@ class ProbeResult:
             if slot and slot.accepted_token:
                 table["white_balance"][ch] = slot.accepted_token
 
-        if self.picture_mode_command and self.picture_mode_sdr:
-            table["picture_mode"]["sdr"] = self.picture_mode_sdr
-        if self.picture_mode_command and self.picture_mode_hdr10:
-            table["picture_mode"]["hdr10"] = self.picture_mode_hdr10
+        if self.picture_mode_command:
+            table["picture_mode"]["command"] = self.picture_mode_command
+            if self.picture_mode_sdr:
+                table["picture_mode"]["sdr"] = self.picture_mode_sdr
+            if self.picture_mode_hdr10:
+                table["picture_mode"]["hdr10"] = self.picture_mode_hdr10
 
         cms_axes = ["red", "green", "blue", "cyan", "magenta", "yellow"]
         for axis in cms_axes:

@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import threading
+import time
 from pathlib import Path
 from typing import Any, Literal
 
@@ -22,7 +23,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from .config import ConfigError, load_command_table, load_config
+from .config import ConfigError, load_command_table, load_config, load_config_from_dict
 from .discovery import NetworkDiscovery
 from .engine import CalibrationEngine, CalibrationReport
 from .pgen import NullPatchDisplay, PGenClient, RGBPatch
@@ -169,17 +170,11 @@ class ConfigUpdate(BaseModel):
 
 @app.post("/api/config")
 async def update_config(body: ConfigUpdate) -> dict:
-    import json, tempfile
-    from pathlib import Path
-    tmp = Path(tempfile.mktemp(suffix=".json"))
     try:
-        tmp.write_text(json.dumps(body.config))
-        _state.config = load_config(str(tmp))
+        _state.config = load_config_from_dict(body.config)
         return {"ok": True}
     except ConfigError as e:
         raise HTTPException(400, detail=str(e))
-    finally:
-        tmp.unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -225,6 +220,39 @@ class RunRequest(BaseModel):
     dry_run: bool = False
 
 
+def _switch_picture_mode(projector: ProjectorClient, mode: str) -> None:
+    """Put the projector into the requested picture mode before calibrating.
+
+    SDR and HDR settings are completely separate on the 5040UB, so calibrating
+    the wrong mode silently produces a useless profile. Skipped when the command
+    table has no value for the mode; a rejected command is reported but does not
+    abort the run (the user may have already set the mode manually).
+    """
+    pm = _state.command_table.get("picture_mode", {})
+    if not pm.get(mode):
+        logger.info("No picture_mode.%s token in command table — skipping mode switch", mode)
+        return
+    try:
+        projector.set_picture_mode(mode, fallback_command=_state.config.hdr.picture_mode_command)
+        settle = _state.config.hdr.mode_switch_settle_ms
+        if settle > 0:
+            time.sleep(settle / 1000.0)
+    except ProjectorError as e:
+        logger.warning("Picture mode switch failed: %s — continuing with current mode", e)
+        _state.broadcast_event({
+            "event": "error",
+            "message": f"Picture mode switch to '{mode}' failed ({e}); "
+                       "continuing with the projector's current mode.",
+        })
+
+
+def _dummy_measure() -> tuple[float, float, float]:
+    """Random-ish D65-like reading for dry runs on platforms without spotread."""
+    import random
+    Y = 50.0 + random.uniform(-5, 5)
+    return (0.95 * Y, Y, 1.08 * Y)
+
+
 @app.post("/api/run")
 async def start_run(body: RunRequest) -> dict:
     if _state.is_running():
@@ -234,12 +262,16 @@ async def start_run(body: RunRequest) -> dict:
         proj_cfg = _state.config.projector
         pgen_cfg = _state.config.pgen
         cal_cfg = _state.config.calibration
+        projector = display = col = None
 
         try:
             projector = ProjectorClient.from_config(
                 proj_cfg, command_table=_state.command_table
             )
             projector.connect()
+            # Dry runs must not mutate projector state — skip the mode switch
+            if not body.dry_run:
+                _switch_picture_mode(projector, body.mode)
 
             if body.dry_run:
                 display = NullPatchDisplay(patch_settle_ms=pgen_cfg.patch_settle_ms)
@@ -250,7 +282,9 @@ async def start_run(body: RunRequest) -> dict:
                     patch_settle_ms=pgen_cfg.patch_settle_ms,
                 )
 
-            # Colorimeter is POSIX-only — on Windows use a dummy measure function
+            # Colorimeter is POSIX-only. A dummy measure function is acceptable
+            # for dry runs, but a real run driven by random readings would walk
+            # the projector's settings randomly — refuse instead.
             try:
                 from .colorimeter import Colorimeter
                 col = Colorimeter(
@@ -262,11 +296,21 @@ async def start_run(body: RunRequest) -> dict:
                 col.start()
                 measure_fn = col.measure
             except ImportError:
-                logger.warning("Colorimeter module unavailable on this platform — using dummy measure")
-                def measure_fn():
-                    import random
-                    Y = 50.0 + random.uniform(-5, 5)
-                    return (0.95 * Y, Y, 1.08 * Y)
+                if not body.dry_run:
+                    raise RuntimeError(
+                        "Colorimeter is not available on this platform (POSIX only). "
+                        "Run the server on a Linux/macOS host for a real calibration, "
+                        "or enable dry-run to test the loop."
+                    )
+                logger.warning("Colorimeter unavailable on this platform — dry run with dummy measure")
+                measure_fn = _dummy_measure
+
+            display.connect()
+
+            anomaly_check = None
+            if _state.ai_enabled:
+                from .agents.anomaly_detector import detect_anomaly
+                anomaly_check = detect_anomaly
 
             engine = CalibrationEngine(
                 projector=projector,
@@ -276,29 +320,42 @@ async def start_run(body: RunRequest) -> dict:
                 mode=body.mode,
                 dry_run=body.dry_run,
                 on_event=_state.broadcast_event,
+                anomaly_check=anomaly_check,
             )
             _state._engine = engine
-            display.connect()
 
-            try:
-                if body.phase == "all":
-                    engine.run_all()
-                elif body.phase == "wb":
-                    engine.run_wb_only()
-                else:
-                    engine.run_cms_only()
-            finally:
-                display.disconnect()
-                projector.disconnect()
+            if body.phase == "all":
+                report = engine.run_all()
+            elif body.phase == "wb":
+                report = engine.run_wb_only()
+            else:
+                report = engine.run_cms_only()
+
+            if _state.ai_enabled and not report.aborted:
                 try:
-                    col.stop()
+                    from .agents.results_analyst import analyze_results
+                    result = analyze_results(report)
+                    _state.broadcast_event({
+                        "event": "agent_result", "agent": "results_analyst", "result": result,
+                    })
                 except Exception:
-                    pass
+                    logger.exception("results_analyst failed — report is unaffected")
 
         except Exception as e:
             logger.exception("Calibration run failed")
             _state.broadcast_event({"event": "error", "message": str(e)})
         finally:
+            for cleanup in (
+                display.disconnect if display else None,
+                projector.disconnect if projector else None,
+                col.stop if col else None,
+            ):
+                if cleanup is None:
+                    continue
+                try:
+                    cleanup()
+                except Exception:
+                    pass
             _state._engine = None
 
     thread = threading.Thread(target=_do_run, daemon=True, name="calibration")

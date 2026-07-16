@@ -74,7 +74,9 @@ function handleEvent(ev) {
   switch (ev.event) {
     case 'patch_start':
       setPatchActive(ev.patch);
-      updatePhaseLabel(ev.mode === 'wb' ? 'White Balance' : 'CMS', ev.patch);
+      updatePhaseLabel(
+        ev.mode === 'wb' ? 'White Balance' : ev.mode === 'verify' ? 'Verification' : 'CMS',
+        ev.patch);
       break;
 
     case 'measurement':
@@ -468,6 +470,12 @@ function updatePatchDE(name, de) {
   const cell = document.getElementById('patch-' + name);
   if (!cell) return;
   const deEl = cell.querySelector('.patch-de');
+  // delta_e is null when a patch was never measured (aborted run)
+  if (de === null || de === undefined || !isFinite(de)) {
+    deEl.textContent = '—';
+    deEl.className = 'patch-de text-dim';
+    return;
+  }
   deEl.textContent = de.toFixed(3);
   deEl.className = 'patch-de ' + deClass(de);
 }
@@ -567,13 +575,14 @@ function renderResults(report) {
 
   Object.entries(byName).forEach(([patch, data]) => {
     const before = data.before;
-    const after  = data.after;
-    const improvement = before !== undefined ? (before - after) : null;
+    // delta_e is null for patches never measured (aborted run)
+    const after  = (data.after === null || data.after === undefined) ? null : data.after;
+    const improvement = (before !== undefined && after !== null) ? (before - after) : null;
     const tr = document.createElement('tr');
     tr.innerHTML = `
       <td>${patch}</td>
       <td class="${before !== undefined ? deClass(before) : 'text-dim'}">${before !== undefined ? before.toFixed(4) : '—'}</td>
-      <td class="${deClass(after)}">${after.toFixed(4)}</td>
+      <td class="${after !== null ? deClass(after) : 'text-dim'}">${after !== null ? after.toFixed(4) : '—'}</td>
       <td class="${improvement !== null && improvement > 0 ? 'de-excellent' : 'de-fail'}">${improvement !== null ? (improvement > 0 ? '▼' : '▲') + ' ' + Math.abs(improvement).toFixed(4) : '—'}</td>
       <td><span class="badge ${data.converged ? 'badge-ok' : 'badge-fail'}">${data.converged ? 'Pass' : 'Fail'}</span></td>
     `;
