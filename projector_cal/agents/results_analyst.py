@@ -6,7 +6,7 @@ Analyzes a CalibrationReport and produces plain-language findings:
   - List of issues (e.g., which axes didn't converge, high ΔE outliers)
   - Actionable recommendations
 
-Uses claude-opus-4-6 with adaptive thinking and structured JSON output.
+Uses claude-opus-4-8 with adaptive thinking and structured JSON output.
 """
 
 from __future__ import annotations
@@ -84,18 +84,14 @@ Grade as Excellent (all ΔE < 0.5), Good (all < 1.0), Acceptable (≤2 patches >
             output_config={
                 "format": {
                     "type": "json_schema",
-                    "json_schema": {
-                        "name": "calibration_analysis",
-                        "strict": True,
-                        "schema": _OUTPUT_SCHEMA,
-                    },
+                    "schema": _OUTPUT_SCHEMA,
                 }
             },
             messages=[{"role": "user", "content": prompt}],
         )
         # Find the text content block (thinking blocks come first)
         for block in response.content:
-            if hasattr(block, "text"):
+            if block.type == "text":
                 return json.loads(block.text)
         return _agent_unavailable("No text block in response")
     except Exception as e:

@@ -110,17 +110,13 @@ Recommend an action: continue, retry_measurement, pause_and_check, or abort_patc
             output_config={
                 "format": {
                     "type": "json_schema",
-                    "json_schema": {
-                        "name": "anomaly_result",
-                        "strict": True,
-                        "schema": _OUTPUT_SCHEMA,
-                    },
+                    "schema": _OUTPUT_SCHEMA,
                 }
             },
             messages=[{"role": "user", "content": prompt}],
         )
         for block in response.content:
-            if hasattr(block, "text"):
+            if block.type == "text":
                 return json.loads(block.text)
         return {"anomaly": False, "type": None, "action": "continue", "reason": "No response text"}
     except Exception as e:

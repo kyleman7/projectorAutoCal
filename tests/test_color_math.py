@@ -22,10 +22,12 @@ from projector_cal.color_math import (
 
 class TestXyYToXYZ:
     def test_d65_white(self):
+        # 4-decimal chromaticity (0.3127, 0.3290) reproduces the textbook
+        # white XYZ only to ~0.03 (Z comes out 108.906 vs 108.883)
         X, Y, Z = xyY_to_XYZ(0.3127, 0.3290, 100.0)
-        assert abs(X - 95.047) < 0.02
+        assert abs(X - 95.047) < 0.05
         assert Y == pytest.approx(100.0)
-        assert abs(Z - 108.883) < 0.02
+        assert abs(Z - 108.883) < 0.05
 
     def test_rec709_red(self):
         # Known: Rec.709 red at Y≈21.26 → X≈41.24, Z≈01.93
@@ -157,6 +159,46 @@ class TestTargets:
         sdr = get_target_lab("red", "sdr")
         hdr = get_target_lab("red", "hdr10")
         assert delta_e_2000(sdr, hdr) > 1.0
+
+    @pytest.mark.parametrize("mode", ["sdr", "hdr10"])
+    @pytest.mark.parametrize("secondary,components", [
+        ("cyan", ("green", "blue")),
+        ("magenta", ("red", "blue")),
+        ("yellow", ("red", "green")),
+    ])
+    def test_secondaries_are_sum_of_primaries(self, mode, secondary, components):
+        """Additive display model: secondary XYZ must equal the sum of its primaries."""
+        Xs, Ys, Zs = xyY_to_XYZ(*get_target_xyY(secondary, mode))
+        expected = [0.0, 0.0, 0.0]
+        for prim in components:
+            for i, v in enumerate(xyY_to_XYZ(*get_target_xyY(prim, mode))):
+                expected[i] += v
+        assert Xs == pytest.approx(expected[0], abs=0.01)
+        assert Ys == pytest.approx(expected[1], abs=0.01)
+        assert Zs == pytest.approx(expected[2], abs=0.01)
+
+    def test_hdr10_yellow_matches_p3_primaries(self):
+        """Regression: the old hardcoded HDR10 yellow was (0.4230, 0.5050) —
+        several ΔE away from what the P3 primaries actually sum to."""
+        x, y, _ = get_target_xyY("yellow", "hdr10")
+        assert x == pytest.approx(0.4379, abs=0.001)
+        assert y == pytest.approx(0.5359, abs=0.001)
+
+    def test_secondary_plus_primary_is_white(self):
+        """cyan + red = white for an additive display."""
+        Xc, Yc, Zc = xyY_to_XYZ(*get_target_xyY("cyan", "sdr"))
+        Xr, Yr, Zr = xyY_to_XYZ(*get_target_xyY("red", "sdr"))
+        Xw, Yw, Zw = xyY_to_XYZ(*get_target_xyY("white", "sdr"))
+        assert Xc + Xr == pytest.approx(Xw, abs=0.15)
+        assert Yc + Yr == pytest.approx(Yw, abs=0.15)
+        assert Zc + Zr == pytest.approx(Zw, abs=0.15)
+
+    def test_grey_targets_use_display_gamma(self):
+        """Grey luminance targets follow gamma 2.2 (not the old power-2.0 values)."""
+        _, _, y75 = get_target_xyY("grey75", "sdr")
+        _, _, y50 = get_target_xyY("grey50", "sdr")
+        assert y75 == pytest.approx(((191 / 255) ** 2.2) * 100, abs=0.01)
+        assert y50 == pytest.approx(((128 / 255) ** 2.2) * 100, abs=0.01)
 
 
 # ---- patch_rgb ----------------------------------------------------------------

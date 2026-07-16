@@ -119,17 +119,13 @@ Produce a checklist with pass/fail for each item and a brief note."""
             output_config={
                 "format": {
                     "type": "json_schema",
-                    "json_schema": {
-                        "name": "setup_validation",
-                        "strict": True,
-                        "schema": _OUTPUT_SCHEMA,
-                    },
+                    "schema": _OUTPUT_SCHEMA,
                 }
             },
             messages=[{"role": "user", "content": prompt}],
         )
         for block in response.content:
-            if hasattr(block, "text"):
+            if block.type == "text":
                 return json.loads(block.text)
         return _rule_based_validate(
             projector_connected, pgen_connected, command_table_complete,

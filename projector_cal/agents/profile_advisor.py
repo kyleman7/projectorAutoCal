@@ -3,7 +3,7 @@
 Compares two CalibrationProfiles and explains what changed in plain language.
 Used in the Profiles tab of the web UI when the user selects two profiles to compare.
 
-Uses claude-opus-4-6 with adaptive thinking.
+Uses claude-opus-4-8 with adaptive thinking.
 """
 
 from __future__ import annotations
@@ -104,17 +104,13 @@ hardware drift or a re-calibration was needed."""
             output_config={
                 "format": {
                     "type": "json_schema",
-                    "json_schema": {
-                        "name": "profile_comparison",
-                        "strict": True,
-                        "schema": _OUTPUT_SCHEMA,
-                    },
+                    "schema": _OUTPUT_SCHEMA,
                 }
             },
             messages=[{"role": "user", "content": prompt}],
         )
         for block in response.content:
-            if hasattr(block, "text"):
+            if block.type == "text":
                 result = json.loads(block.text)
                 result["delta_e_delta"] = de_delta  # inject computed table
                 return result

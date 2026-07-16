@@ -137,7 +137,16 @@ class TCPTransport:
             raise ProjectorError("TCP transport not connected")
         buf = b""
         while True:
-            chunk = self._sock.recv(256)
+            try:
+                chunk = self._sock.recv(256)
+            except socket.timeout as e:
+                # A token the firmware silently ignores must not kill the caller
+                # (e.g. abort an entire probe run) — surface as ProjectorError.
+                raise ProjectorError(
+                    f"Timed out waiting for projector response (received so far: {buf!r})"
+                ) from e
+            except OSError as e:
+                raise ProjectorError(f"Receive failed: {e}") from e
             if not chunk:
                 raise ProjectorError("Connection closed by projector during receive")
             buf += chunk
@@ -467,10 +476,17 @@ class ProjectorClient:
     # Picture Mode
     # ------------------------------------------------------------------
 
-    def set_picture_mode(self, mode: Literal["sdr", "hdr10"]) -> None:
-        token = self._picture_mode_token(mode)
-        self._send_command(token, "")
-        logger.info("Picture mode → %s (token '%s')", mode, token)
+    def set_picture_mode(self, mode: Literal["sdr", "hdr10"], command: str | None = None) -> None:
+        """Switch picture mode by sending ``<command> <value>`` (e.g. ``PMOD HDR4``).
+
+        The mode *value* comes from the command table (picture_mode.sdr/hdr10);
+        the *command* defaults to the probed picture_mode.command token, falling
+        back to "PMOD".
+        """
+        value = self._picture_mode_token(mode)
+        cmd = command or self._command_table.get("picture_mode", {}).get("command") or "PMOD"
+        self._send_command(cmd, value)
+        logger.info("Picture mode → %s ('%s %s')", mode, cmd, value)
 
     # ------------------------------------------------------------------
     # Probe helper

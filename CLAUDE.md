@@ -188,26 +188,43 @@ Proportional control with decaying step scale (not PID — no time constants nee
 step_scale = initial (0.8)
 
 for each iteration:
-    measure XYZ → compute Lab → compute ΔE
+    measure XYZ → normalize to reference white → compute Lab → compute ΔE
     if ΔE < threshold: converged; break
+    if ΔE did not improve for 3 consecutive iterations: revert to best-known settings; break
     compute correction proportional to error × step_scale
     apply correction to projector
-    step_scale = max(minimum, step_scale × (ΔE / threshold) × 0.5)
+    step_scale = min(initial, max(minimum, step_scale × (ΔE / threshold) × 0.5))
 ```
 
+**Relative colorimetry (critical):** spotread returns absolute XYZ in cd/m², but all
+targets are relative to white = 100. The engine measures a reference white (end of
+phase 1, or a dedicated white measurement at the start of phase 2/3) and rescales
+every reading by `100 / Y_white` before comparing to targets. Never compare raw
+absolute readings to the target tables — ΔE becomes dominated by a bogus
+luminance error and the loop cannot converge.
+
+**Step clamp:** the raw decay formula *grows* when ΔE > 2× threshold, so it is
+clamped to the initial value. A divergence guard (3 consecutive non-improving
+iterations → revert to best-known settings and stop the patch) protects against
+unstable loops and wrong control-direction assumptions.
+
 Phase 1 — White Balance:
-- Display white patch, adjust R/G/B gains toward D65
-- Error = chromaticity XY distance from D65 white point, normalized by gain range
+- Display white patch, adjust R/G/B gains toward D65 (each reading normalized to Y=100 → chromaticity-only ΔE)
+- G is the fixed reference channel (its error is 0 by construction); R and B move
+- `gain_delta = -round(channel_err × step_scale × gain_range)` where `channel_err = (meas − target) / target`
 
 Phase 2 — CMS (6 axes: red, green, blue, cyan, magenta, yellow):
 - Display each primary/secondary patch
-- Hue error: angular difference in Lab ab-plane (degrees)
+- Hue error: angular difference in Lab ab-plane (degrees), `target − measured`
 - Sat error: chroma ratio `(chroma_target - chroma_meas) / chroma_target`
 - Lum error: `(L_target - L_meas) / 100`
-- Deltas: `hue_delta = -round(hue_err_deg × step_scale)` etc.
+- Deltas move *toward* target assuming positive control = more hue-angle/sat/lum:
+  `hue_delta = +round(hue_err_deg × step_scale)`, `sat_delta = +round(sat_err × step_scale × 10)`,
+  `lum_delta = +round(lum_err × step_scale × 10)`. If a projector axis is inverted,
+  the divergence guard reverts instead of walking away.
 
 Phase 3 — Verification:
-- Measure all 9 patches without applying corrections
+- Measure all 9 patches without applying corrections (white first — it re-anchors the reference)
 - Record final ΔE for report
 
 Convergence threshold: ΔE < 1.0 (configurable, default 1.0)
@@ -276,9 +293,13 @@ All engine events are broadcast as JSON objects. Key events:
 ## Claude API Agents
 
 ```python
-MODEL_OPUS  = "claude-opus-4-6"        # complex reasoning
+MODEL_OPUS  = "claude-opus-4-8"        # complex reasoning
 MODEL_HAIKU = "claude-haiku-4-5-20251001"  # fast/cheap, real-time
 ```
+
+Structured output uses the current API shape:
+`output_config={"format": {"type": "json_schema", "schema": SCHEMA}}`
+(no nested `json_schema`/`name`/`strict` wrapper — that shape is obsolete).
 
 | Agent | Model | When called | Output schema |
 |-------|-------|-------------|---------------|
@@ -371,6 +392,20 @@ Results cached to `discovery/last_scan.json` (gitignored).
 9. **Phase 3 (verify) measures 9 patches** (white + 6 colors + grey75 + grey50). Phases 1 and 2 measure 1 and 6 patches respectively. The progress counter must account for all phases.
 
 10. **Profile filenames**: Derived from `name_mode_timestamp.json`. The JS re-derives the filename client-side using the same Python logic — keep them in sync.
+
+11. **colormath XYZColor is on the 0–1 scale**: reference white is (0.95047, 1.0, 1.08883). Passing Y=100-scale values makes white come out as L*≈522 and silently distorts every ΔE. `xyz_to_lab()` divides by 100 before constructing `XYZColor` — keep it that way.
+
+12. **numpy ≥1.23 removed `asscalar`**, which python-colormath 3.0 still calls. `color_math.py` installs a shim (`np.asscalar = lambda a: a.item()`) before importing colormath. Without it every `delta_e` call raises AttributeError.
+
+13. **Never rescale a patch target to Y=100 in `get_target_lab`**: target xyY luminances are already relative to white=100. Per-patch rescaling makes every target as bright as white (red would get L*=100 instead of ~53).
+
+14. **spotread readings are absolute cd/m²** — always normalize against the measured reference white before comparing to targets (see Calibration Algorithm → Relative colorimetry).
+
+15. **Secondary targets are derived, not hardcoded**: cyan/magenta/yellow xyY are computed at import time by summing the XYZ of their constituent primaries (`color_math._build_targets`). Hardcoded HDR10 secondaries were several ΔE off. Grey targets use display gamma 2.2.
+
+16. **Dummy measurements are dry-run only**: `server.py` refuses a real (non-dry) run when the colorimeter module is unavailable. Driving corrections from random readings would walk the projector's settings randomly.
+
+17. **CMS correction signs assume positive control = more hue-angle/sat/lum** and move toward the target (same convention as WB). The engine's divergence guard reverts to best-known values if a projector axis turns out inverted — do not reintroduce the old negated deltas, which moved *away* from target.
 
 ---
 
