@@ -247,10 +247,11 @@ All engine events are broadcast as JSON objects. Key events:
 
 ```json
 {"event": "phase_start",    "phase": "wb|cms|verify"}
-{"event": "patch_start",    "patch": "white", "iteration": 1, "mode": "wb|cms"}
+{"event": "patch_start",    "patch": "white", "iteration": 1, "mode": "wb|cms|verify"}
 {"event": "measurement",    "patch": "white", "xyz": [X,Y,Z], "delta_e": 0.42}
 {"event": "correction",     "patch": "white", "axis": "WB_R", "before": 128, "after": 131}
 {"event": "patch_done",     "patch": "white", "delta_e": 0.38, "iterations": 4, "converged": true}
+   // patch_done delta_e is null when the patch was never measured (aborted run)
 {"event": "phase_done",     "phase": "wb"}
 {"event": "run_complete",   "report": {...}}
 {"event": "error",          "message": "..."}

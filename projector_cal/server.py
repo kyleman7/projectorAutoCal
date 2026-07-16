@@ -229,13 +229,11 @@ def _switch_picture_mode(projector: ProjectorClient, mode: str) -> None:
     abort the run (the user may have already set the mode manually).
     """
     pm = _state.command_table.get("picture_mode", {})
-    value = pm.get(mode)
-    if not value:
+    if not pm.get(mode):
         logger.info("No picture_mode.%s token in command table — skipping mode switch", mode)
         return
-    command = pm.get("command") or _state.config.hdr.picture_mode_command
     try:
-        projector.set_picture_mode(mode, command=command)
+        projector.set_picture_mode(mode, fallback_command=_state.config.hdr.picture_mode_command)
         settle = _state.config.hdr.mode_switch_settle_ms
         if settle > 0:
             time.sleep(settle / 1000.0)
@@ -271,7 +269,9 @@ async def start_run(body: RunRequest) -> dict:
                 proj_cfg, command_table=_state.command_table
             )
             projector.connect()
-            _switch_picture_mode(projector, body.mode)
+            # Dry runs must not mutate projector state — skip the mode switch
+            if not body.dry_run:
+                _switch_picture_mode(projector, body.mode)
 
             if body.dry_run:
                 display = NullPatchDisplay(patch_settle_ms=pgen_cfg.patch_settle_ms)

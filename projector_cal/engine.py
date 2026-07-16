@@ -231,6 +231,8 @@ class CalibrationEngine:
         worse_streak = 0
         recent_xyz: list[tuple[float, float, float]] = []
         recent_de: list[float] = []
+        # D65 target at the normalized luminance — loop-invariant
+        target_X, target_Y, target_Z = xyY_to_XYZ(target_x, target_y, 100.0)
 
         self.display.display_patch(RGBPatch(*patch_rgb("white")))
 
@@ -268,7 +270,6 @@ class CalibrationEngine:
                     logger.warning("WB diverging — reverting to best-known gains %s (ΔE=%.4f)",
                                    best_gains, best_de)
                     self._apply_wb_gains("white", gains, best_gains)
-                    final_de = best_de
                     break
 
             action = self._run_anomaly_check("white", iteration, recent_xyz, recent_de)
@@ -279,7 +280,6 @@ class CalibrationEngine:
 
             # Chromaticity correction — compare against the D65 target at the
             # same (normalized) luminance; G acts as the fixed reference channel.
-            target_X, target_Y, target_Z = xyY_to_XYZ(target_x, target_y, 100.0)
             r_err = (X * scale - target_X) / max(target_X, 1e-6)
             g_err = (Y * scale - target_Y) / max(target_Y, 1e-6)
             b_err = (Z * scale - target_Z) / max(target_Z, 1e-6)
@@ -291,6 +291,14 @@ class CalibrationEngine:
             }
             self._apply_wb_gains("white", gains, new_gains)
             step_scale = self._decay_step(step_scale, de)
+
+        if not converged and not self._abort:
+            # Gains changed after the last reading (final-iteration correction
+            # or divergence revert) — re-measure once so the reported result and
+            # the white reference reflect the projector's actual final state.
+            X, Y, Z = self.measure()
+            scale = 100.0 / Y if Y > 1e-6 else 1.0
+            final_de = delta_e_2000(xyz_to_lab(X * scale, Y * scale, Z * scale), target_lab)
 
         if Y > 1e-6:
             # White luminance anchors relative colorimetry for phases 2 and 3
@@ -307,7 +315,7 @@ class CalibrationEngine:
             final_xyz=(X, Y, Z),
             initial_delta_e=initial_de,
         )
-        self.on_event({"event": "patch_done", "patch": "white", "delta_e": final_de,
+        self.on_event({"event": "patch_done", "patch": "white", "delta_e": _de_or_none(final_de),
                        "iterations": iteration, "converged": converged})
         self.on_event({"event": "phase_done", "phase": "wb"})
         return result
@@ -402,7 +410,6 @@ class CalibrationEngine:
                     logger.warning("CMS %s diverging — reverting to best-known values %s (ΔE=%.4f)",
                                    axis, best_cms, best_de)
                     self._apply_cms(axis, cms, best_cms)
-                    final_de = best_de
                     break
 
             action = self._run_anomaly_check(axis, iteration, recent_xyz, recent_de)
@@ -447,6 +454,12 @@ class CalibrationEngine:
             self._apply_cms(axis, cms, new_cms)
             step_scale = self._decay_step(step_scale, de)
 
+        if not converged and not self._abort:
+            # Controls changed after the last reading (final-iteration correction
+            # or divergence revert) — re-measure once for an honest final result.
+            X, Y, Z = self.measure()
+            final_de = delta_e_2000(xyz_to_lab(*self._to_relative(X, Y, Z)), target_lab)
+
         if not converged:
             logger.warning("CMS %s did not converge after %d iterations (ΔE=%.4f)",
                            axis, iteration, final_de)
@@ -459,7 +472,7 @@ class CalibrationEngine:
             final_xyz=(X, Y, Z),
             initial_delta_e=initial_de,
         )
-        self.on_event({"event": "patch_done", "patch": axis, "delta_e": final_de,
+        self.on_event({"event": "patch_done", "patch": axis, "delta_e": _de_or_none(final_de),
                        "iterations": iteration, "converged": converged})
         return result
 
@@ -498,15 +511,19 @@ class CalibrationEngine:
             target_lab = get_target_lab(patch_name, self.mode)
             de = delta_e_2000(meas_lab, target_lab)
 
+            converged = de < self.config.delta_e_threshold
             self.on_event({"event": "measurement", "patch": patch_name, "xyz": [X, Y, Z], "delta_e": de})
-            logger.info("Verify %s: ΔE=%.4f %s", patch_name, de,
-                        "✓" if de < self.config.delta_e_threshold else "✗")
+            # patch_done drives the UI progress counter, which accounts for all
+            # phases (CLAUDE.md pitfall #9) — verify must emit it too
+            self.on_event({"event": "patch_done", "patch": patch_name, "delta_e": de,
+                           "iterations": 1, "converged": converged})
+            logger.info("Verify %s: ΔE=%.4f %s", patch_name, de, "✓" if converged else "✗")
 
             results.append(PatchResult(
                 patch_name=patch_name,
                 final_delta_e=de,
                 iterations=1,
-                converged=de < self.config.delta_e_threshold,
+                converged=converged,
                 final_xyz=(X, Y, Z),
             ))
 
@@ -578,6 +595,11 @@ class CalibrationEngine:
 
 def _clamp(value: int, lo: int, hi: int) -> int:
     return max(lo, min(hi, value))
+
+
+def _de_or_none(de: float) -> float | None:
+    """inf (patch never measured, e.g. aborted) is not valid JSON — use null."""
+    return None if math.isinf(de) else de
 
 
 def _report_to_dict(report: CalibrationReport) -> dict:

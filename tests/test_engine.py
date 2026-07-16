@@ -230,7 +230,6 @@ class TestCMS:
         """run_cms_only must anchor relative colorimetry before correcting."""
         proj = FakeProjector()
         display = FakeDisplay()
-        state = {"patch": None}
 
         def measure():
             if display.current == (255, 255, 255):
@@ -337,15 +336,21 @@ class TestVerify:
             Z = sum(f * p[2] for f, p in zip(lin, prim.values()))
             return (X * brightness, Y * brightness, Z * brightness)
 
+        events = []
         engine = CalibrationEngine(
             projector=proj, display=display,
             measure=measure,
             config=make_config(),
+            on_event=events.append,
         )
         results = engine._phase3_verify()
         assert len(results) == 9
         for r in results:
             assert r.final_delta_e < 1.0, f"{r.patch_name}: ΔE={r.final_delta_e}"
+        # Verify must drive the UI progress counter: one patch_start and one
+        # patch_done per patch (CLAUDE.md pitfall #9)
+        assert sum(1 for e in events if e["event"] == "patch_start") == 9
+        assert sum(1 for e in events if e["event"] == "patch_done") == 9
 
     def test_report_serialization_has_no_infinity(self):
         """Aborted runs must not leak Infinity into the JSON report."""

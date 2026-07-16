@@ -476,15 +476,20 @@ class ProjectorClient:
     # Picture Mode
     # ------------------------------------------------------------------
 
-    def set_picture_mode(self, mode: Literal["sdr", "hdr10"], command: str | None = None) -> None:
+    def set_picture_mode(self, mode: Literal["sdr", "hdr10"], fallback_command: str | None = None) -> None:
         """Switch picture mode by sending ``<command> <value>`` (e.g. ``PMOD HDR4``).
 
-        The mode *value* comes from the command table (picture_mode.sdr/hdr10);
-        the *command* defaults to the probed picture_mode.command token, falling
-        back to "PMOD".
+        The mode *value* comes from the command table (picture_mode.sdr/hdr10).
+        The *command* token resolves here and only here: probed
+        picture_mode.command → caller-supplied fallback (e.g. hdr config) →
+        "PMOD". Callers must not re-derive the command themselves.
         """
         value = self._picture_mode_token(mode)
-        cmd = command or self._command_table.get("picture_mode", {}).get("command") or "PMOD"
+        cmd = (
+            self._command_table.get("picture_mode", {}).get("command")
+            or fallback_command
+            or "PMOD"
+        )
         self._send_command(cmd, value)
         logger.info("Picture mode → %s ('%s %s')", mode, cmd, value)
 
