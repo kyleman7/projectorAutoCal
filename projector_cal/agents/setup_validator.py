@@ -9,7 +9,6 @@ Uses claude-haiku-4-5 (simple classification task, no complex reasoning needed).
 
 from __future__ import annotations
 
-import json
 import logging
 
 logger = logging.getLogger(__name__)
@@ -60,7 +59,7 @@ def validate_setup(
         dict with keys: ready (bool), checklist (list), blocking_issues (list).
         Falls back gracefully if agent unavailable.
     """
-    from .base import MODEL_HAIKU, _agent_unavailable, get_client
+    from .base import MODEL_HAIKU, request_structured
 
     # Check command table completeness locally (no LLM needed for this)
     wb_ok = all(
@@ -73,15 +72,6 @@ def validate_setup(
         for prop in ("HUE", "SAT", "LUM")
     )
     command_table_complete = wb_ok and cms_ok
-
-    # Fast path: if no API key, return a rule-based result
-    try:
-        client = get_client()
-    except (EnvironmentError, ImportError):
-        return _rule_based_validate(
-            projector_connected, pgen_connected, command_table_complete,
-            warm_up_stable, colorimeter_detected, screen_info,
-        )
 
     screen_desc = (
         f"Diagonal: {screen_info.get('diagonal_inches', 'unknown')} inches, "
@@ -113,25 +103,14 @@ Non-blocking warnings (calibration can proceed but quality may suffer):
 Produce a checklist with pass/fail for each item and a brief note."""
 
     try:
-        response = client.messages.create(
-            model=MODEL_HAIKU,
-            max_tokens=512,
-            output_config={
-                "format": {
-                    "type": "json_schema",
-                    "schema": _OUTPUT_SCHEMA,
-                }
-            },
-            messages=[{"role": "user", "content": prompt}],
-        )
-        for block in response.content:
-            if block.type == "text":
-                return json.loads(block.text)
+        return request_structured(MODEL_HAIKU, prompt, _OUTPUT_SCHEMA, max_tokens=512)
+    except (EnvironmentError, ImportError):
+        # No API key / SDK — quiet fallback, the rule-based path is fully capable
         return _rule_based_validate(
             projector_connected, pgen_connected, command_table_complete,
             warm_up_stable, colorimeter_detected, screen_info,
         )
-    except Exception as e:
+    except Exception:
         logger.exception("setup_validator failed; falling back to rule-based")
         return _rule_based_validate(
             projector_connected, pgen_connected, command_table_complete,

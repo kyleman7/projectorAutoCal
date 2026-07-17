@@ -16,7 +16,7 @@ import math
 
 import pytest
 
-from projector_cal.color_math import get_target_lab, xyY_to_XYZ
+from projector_cal.color_math import D65_WHITE_XYZ, get_target_lab, xyY_to_XYZ
 from projector_cal.config import CalibrationConfig
 from projector_cal.engine import CalibrationEngine, _MAX_WORSENING_ITERATIONS
 
@@ -25,7 +25,7 @@ from colormath.color_objects import LabColor, XYZColor
 
 
 # D65 white XYZ at Y=100
-_D65 = (95.047, 100.000, 108.883)
+_D65 = D65_WHITE_XYZ
 _CMS_AXES = ["red", "green", "blue", "cyan", "magenta", "yellow"]
 
 

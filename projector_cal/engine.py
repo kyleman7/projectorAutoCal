@@ -58,6 +58,16 @@ class PatchResult:
 
 
 @dataclass
+class _LoopOutcome:
+    """What one run of the shared correction loop produced."""
+    final_de: float
+    initial_de: float | None
+    iterations: int
+    converged: bool
+    xyz: tuple[float, float, float]
+
+
+@dataclass
 class CalibrationReport:
     """Complete result from one calibration run."""
     mode: Literal["sdr", "hdr10"]
@@ -197,29 +207,39 @@ class CalibrationEngine:
         return report
 
     # ------------------------------------------------------------------
-    # Phase 1 — White Balance
+    # Shared correction loop
     # ------------------------------------------------------------------
+    #
+    # Both correction phases (WB and CMS) run the same closed loop: measure →
+    # normalize → ΔE → converge/diverge checks → anomaly check → compute and
+    # apply a proportional correction → decay the step. Only the normalization
+    # and the correction physics differ, so they are injected as callables.
 
-    def _phase1_white_balance(self) -> PatchResult:
-        """Adjust R/G/B gains to match D65 white point on the white patch."""
+    def _correction_loop(
+        self,
+        patch_name: str,
+        mode: str,
+        settings: dict,
+        normalize: Callable[[tuple[float, float, float]], tuple[float, float, float]],
+        target_lab: tuple[float, float, float],
+        compute_corrections: Callable[[tuple, tuple, dict, float], dict],
+        apply_settings: Callable[[dict, dict], None],
+    ) -> _LoopOutcome:
+        """Drive one patch's correction loop until convergence or a stop condition.
+
+        Args:
+            patch_name: Patch under correction (also the event name).
+            mode: "wb" or "cms" — for patch_start events and log lines.
+            settings: Live control values (mutated in place via apply_settings).
+            normalize: Maps a raw absolute XYZ reading to the white=100 scale.
+            target_lab: Lab target the loop converges toward.
+            compute_corrections: (norm_xyz, meas_lab, settings, step_scale) →
+                proposed new settings dict.
+            apply_settings: Diffs, emits correction events, writes to the
+                projector (unless dry-run), and mutates `settings`.
+        """
         cfg = self.config
         threshold = cfg.delta_e_threshold
-        gain_lo, gain_hi = cfg.wb_gain_range
-        gain_range = gain_hi - gain_lo
-        target_lab = get_target_lab("white", self.mode)
-        target_x, target_y, _ = get_target_xyY("white", self.mode)
-
-        self.on_event({"event": "phase_start", "phase": "wb"})
-        logger.info("Phase 1: White Balance [mode=%s]", self.mode)
-
-        # Read current gains
-        gains = {
-            "R": self.projector.get_wb_gain("R"),
-            "G": self.projector.get_wb_gain("G"),
-            "B": self.projector.get_wb_gain("B"),
-        }
-        logger.debug("Initial gains: %s", gains)
-
         step_scale = cfg.proportional_gain_initial
         initial_de: float | None = None
         final_de = float("inf")
@@ -227,27 +247,23 @@ class CalibrationEngine:
         iteration = 0
         X = Y = Z = 0.0
         best_de = float("inf")
-        best_gains = dict(gains)
+        best_settings = dict(settings)
         worse_streak = 0
         recent_xyz: list[tuple[float, float, float]] = []
         recent_de: list[float] = []
-        # D65 target at the normalized luminance — loop-invariant
-        target_X, target_Y, target_Z = xyY_to_XYZ(target_x, target_y, 100.0)
 
-        self.display.display_patch(RGBPatch(*patch_rgb("white")))
+        self.display.display_patch(RGBPatch(*patch_rgb(patch_name)))
 
         for iteration in range(1, cfg.max_iterations_per_patch + 1):
             if self._abort:
                 break
 
-            self.on_event({"event": "patch_start", "patch": "white", "iteration": iteration, "mode": "wb"})
+            self.on_event({"event": "patch_start", "patch": patch_name, "iteration": iteration, "mode": mode})
             X, Y, Z = self.measure()
-            # WB corrects chromaticity only: normalize this reading to Y=100 so
-            # the absolute light level (cd/m²) doesn't dominate the ΔE.
-            scale = 100.0 / Y if Y > 1e-6 else 1.0
-            meas_lab = xyz_to_lab(X * scale, Y * scale, Z * scale)
+            norm_xyz = normalize((X, Y, Z))
+            meas_lab = xyz_to_lab(*norm_xyz)
             de = delta_e_2000(meas_lab, target_lab)
-            self.on_event({"event": "measurement", "patch": "white", "xyz": [X, Y, Z], "delta_e": de})
+            self.on_event({"event": "measurement", "patch": patch_name, "xyz": [X, Y, Z], "delta_e": de})
 
             if initial_de is None:
                 initial_de = de
@@ -256,81 +272,144 @@ class CalibrationEngine:
             recent_de.append(de)
             del recent_xyz[:-5], recent_de[:-5]
 
-            logger.info("WB iter %d: ΔE=%.4f (target<%.2f)", iteration, de, threshold)
+            logger.info("%s %s iter %d: ΔE=%.4f (target<%.2f)",
+                        mode.upper(), patch_name, iteration, de, threshold)
 
             if de < threshold:
                 converged = True
                 break
 
             if de < best_de:
-                best_de, best_gains, worse_streak = de, dict(gains), 0
+                best_de, best_settings, worse_streak = de, dict(settings), 0
             else:
                 worse_streak += 1
                 if worse_streak >= _MAX_WORSENING_ITERATIONS:
-                    logger.warning("WB diverging — reverting to best-known gains %s (ΔE=%.4f)",
-                                   best_gains, best_de)
-                    self._apply_wb_gains("white", gains, best_gains)
+                    logger.warning("%s %s diverging — reverting to best-known settings %s (ΔE=%.4f)",
+                                   mode.upper(), patch_name, best_settings, best_de)
+                    apply_settings(settings, best_settings)
                     break
 
-            action = self._run_anomaly_check("white", iteration, recent_xyz, recent_de)
+            action = self._run_anomaly_check(patch_name, iteration, recent_xyz, recent_de)
             if action == "abort_patch":
                 break
             if action == "retry_measurement":
                 continue
 
-            # Chromaticity correction — compare against the D65 target at the
-            # same (normalized) luminance; G acts as the fixed reference channel.
-            r_err = (X * scale - target_X) / max(target_X, 1e-6)
-            g_err = (Y * scale - target_Y) / max(target_Y, 1e-6)
-            b_err = (Z * scale - target_Z) / max(target_Z, 1e-6)
-
-            new_gains = {
-                "R": _clamp(gains["R"] - round(r_err * step_scale * gain_range), gain_lo, gain_hi),
-                "G": _clamp(gains["G"] - round(g_err * step_scale * gain_range), gain_lo, gain_hi),
-                "B": _clamp(gains["B"] - round(b_err * step_scale * gain_range), gain_lo, gain_hi),
-            }
-            self._apply_wb_gains("white", gains, new_gains)
+            apply_settings(settings, compute_corrections(norm_xyz, meas_lab, settings, step_scale))
             step_scale = self._decay_step(step_scale, de)
 
         if not converged and not self._abort:
-            # Gains changed after the last reading (final-iteration correction
-            # or divergence revert) — re-measure once so the reported result and
-            # the white reference reflect the projector's actual final state.
+            # Settings changed after the last reading (final-iteration correction
+            # or divergence revert) — re-measure once so the reported result
+            # reflects the projector's actual final state.
             X, Y, Z = self.measure()
-            scale = 100.0 / Y if Y > 1e-6 else 1.0
-            final_de = delta_e_2000(xyz_to_lab(X * scale, Y * scale, Z * scale), target_lab)
-
-        if Y > 1e-6:
-            # White luminance anchors relative colorimetry for phases 2 and 3
-            self._ref_white_Y = Y
+            final_de = delta_e_2000(xyz_to_lab(*normalize((X, Y, Z))), target_lab)
 
         if not converged:
-            logger.warning("WB did not converge after %d iterations (ΔE=%.4f)", iteration, final_de)
+            logger.warning("%s %s did not converge after %d iterations (ΔE=%.4f)",
+                           mode.upper(), patch_name, iteration, final_de)
 
-        result = PatchResult(
-            patch_name="white",
-            final_delta_e=final_de,
+        return _LoopOutcome(
+            final_de=final_de,
+            initial_de=initial_de,
             iterations=iteration,
             converged=converged,
-            final_xyz=(X, Y, Z),
-            initial_delta_e=initial_de,
+            xyz=(X, Y, Z),
         )
-        self.on_event({"event": "patch_done", "patch": "white", "delta_e": _de_or_none(final_de),
-                       "iterations": iteration, "converged": converged})
-        self.on_event({"event": "phase_done", "phase": "wb"})
-        return result
 
-    def _apply_wb_gains(self, patch: str, current: dict, new: dict) -> None:
-        """Send changed WB gains to the projector (unless dry-run); mutates `current`."""
-        for ch in ("R", "G", "B"):
-            if new[ch] != current[ch]:
+    def _apply_settings(
+        self,
+        patch: str,
+        current: dict,
+        new: dict,
+        axis_names: dict[str, str],
+        setter: Callable[[str, int], None],
+    ) -> None:
+        """Diff `new` against `current`, emit correction events, and write changed
+        values to the projector (unless dry-run); mutates `current` in place."""
+        for key in current:
+            if new[key] != current[key]:
                 self.on_event({
-                    "event": "correction", "patch": patch, "axis": f"WB_{ch}",
-                    "before": current[ch], "after": new[ch],
+                    "event": "correction", "patch": patch, "axis": axis_names[key],
+                    "before": current[key], "after": new[key],
                 })
                 if not self.dry_run:
-                    self.projector.set_wb_gain(ch, new[ch])
-                current[ch] = new[ch]
+                    setter(key, new[key])
+                current[key] = new[key]
+
+    def _emit_patch_result(self, outcome: _LoopOutcome, patch_name: str) -> PatchResult:
+        """Build the PatchResult for a loop outcome and emit its patch_done event."""
+        result = PatchResult(
+            patch_name=patch_name,
+            final_delta_e=outcome.final_de,
+            iterations=outcome.iterations,
+            converged=outcome.converged,
+            final_xyz=outcome.xyz,
+            initial_delta_e=outcome.initial_de,
+        )
+        self.on_event({"event": "patch_done", "patch": patch_name,
+                       "delta_e": _de_or_none(outcome.final_de),
+                       "iterations": outcome.iterations, "converged": outcome.converged})
+        return result
+
+    # ------------------------------------------------------------------
+    # Phase 1 — White Balance
+    # ------------------------------------------------------------------
+
+    def _phase1_white_balance(self) -> PatchResult:
+        """Adjust R/G/B gains to match D65 white point on the white patch."""
+        cfg = self.config
+        gain_lo, gain_hi = cfg.wb_gain_range
+        gain_range = gain_hi - gain_lo
+        target_lab = get_target_lab("white", self.mode)
+        target_x, target_y, _ = get_target_xyY("white", self.mode)
+        # D65 target at the normalized luminance — loop-invariant
+        target_X, target_Y, target_Z = xyY_to_XYZ(target_x, target_y, 100.0)
+
+        self.on_event({"event": "phase_start", "phase": "wb"})
+        logger.info("Phase 1: White Balance [mode=%s]", self.mode)
+
+        gains = {
+            "R": self.projector.get_wb_gain("R"),
+            "G": self.projector.get_wb_gain("G"),
+            "B": self.projector.get_wb_gain("B"),
+        }
+        logger.debug("Initial gains: %s", gains)
+
+        def normalize(xyz: tuple[float, float, float]) -> tuple[float, float, float]:
+            # WB corrects chromaticity only: normalize each reading to Y=100 so
+            # the absolute light level (cd/m²) doesn't dominate the ΔE.
+            X, Y, Z = xyz
+            s = 100.0 / Y if Y > 1e-6 else 1.0
+            return (X * s, Y * s, Z * s)
+
+        def corrections(norm_xyz: tuple, meas_lab: tuple, current: dict, step_scale: float) -> dict:
+            # Chromaticity correction — compare against the D65 target at the
+            # same (normalized) luminance; G acts as the fixed reference channel.
+            Xn, Yn, Zn = norm_xyz
+            r_err = (Xn - target_X) / max(target_X, 1e-6)
+            g_err = (Yn - target_Y) / max(target_Y, 1e-6)
+            b_err = (Zn - target_Z) / max(target_Z, 1e-6)
+            return {
+                "R": _clamp(current["R"] - round(r_err * step_scale * gain_range), gain_lo, gain_hi),
+                "G": _clamp(current["G"] - round(g_err * step_scale * gain_range), gain_lo, gain_hi),
+                "B": _clamp(current["B"] - round(b_err * step_scale * gain_range), gain_lo, gain_hi),
+            }
+
+        def apply(current: dict, new: dict) -> None:
+            self._apply_settings("white", current, new,
+                                 {"R": "WB_R", "G": "WB_G", "B": "WB_B"},
+                                 self.projector.set_wb_gain)
+
+        outcome = self._correction_loop("white", "wb", gains, normalize, target_lab, corrections, apply)
+
+        if outcome.xyz[1] > 1e-6:
+            # White luminance anchors relative colorimetry for phases 2 and 3
+            self._ref_white_Y = outcome.xyz[1]
+
+        result = self._emit_patch_result(outcome, "white")
+        self.on_event({"event": "phase_done", "phase": "wb"})
+        return result
 
     # ------------------------------------------------------------------
     # Phase 2 — CMS
@@ -355,8 +434,6 @@ class CalibrationEngine:
 
     def _cms_axis(self, axis: str) -> PatchResult:
         """Run the correction loop for one CMS axis."""
-        cfg = self.config
-        threshold = cfg.delta_e_threshold
         target_lab = get_target_lab(axis, self.mode)
 
         cms = {
@@ -365,73 +442,21 @@ class CalibrationEngine:
             "LUM": self.projector.get_cms(axis, "LUM"),
         }
 
-        step_scale = cfg.proportional_gain_initial
-        initial_de: float | None = None
-        final_de = float("inf")
-        converged = False
-        iteration = 0
-        X = Y = Z = 0.0
-        best_de = float("inf")
-        best_cms = dict(cms)
-        worse_streak = 0
-        recent_xyz: list[tuple[float, float, float]] = []
-        recent_de: list[float] = []
+        def normalize(xyz: tuple[float, float, float]) -> tuple[float, float, float]:
+            return self._to_relative(*xyz)
 
-        self.display.display_patch(RGBPatch(*patch_rgb(axis)))
-
-        for iteration in range(1, cfg.max_iterations_per_patch + 1):
-            if self._abort:
-                break
-
-            self.on_event({"event": "patch_start", "patch": axis, "iteration": iteration, "mode": "cms"})
-            X, Y, Z = self.measure()
-            meas_lab = xyz_to_lab(*self._to_relative(X, Y, Z))
-            de = delta_e_2000(meas_lab, target_lab)
-            self.on_event({"event": "measurement", "patch": axis, "xyz": [X, Y, Z], "delta_e": de})
-
-            if initial_de is None:
-                initial_de = de
-            final_de = de
-            recent_xyz.append((X, Y, Z))
-            recent_de.append(de)
-            del recent_xyz[:-5], recent_de[:-5]
-
-            logger.info("CMS %s iter %d: ΔE=%.4f", axis, iteration, de)
-
-            if de < threshold:
-                converged = True
-                break
-
-            if de < best_de:
-                best_de, best_cms, worse_streak = de, dict(cms), 0
-            else:
-                worse_streak += 1
-                if worse_streak >= _MAX_WORSENING_ITERATIONS:
-                    logger.warning("CMS %s diverging — reverting to best-known values %s (ΔE=%.4f)",
-                                   axis, best_cms, best_de)
-                    self._apply_cms(axis, cms, best_cms)
-                    break
-
-            action = self._run_anomaly_check(axis, iteration, recent_xyz, recent_de)
-            if action == "abort_patch":
-                break
-            if action == "retry_measurement":
-                continue
-
+        def corrections(norm_xyz: tuple, meas_lab: tuple, current: dict, step_scale: float) -> dict:
             # Decompose Lab error into Hue/Sat/Lum corrections
             L_meas, a_meas, b_meas = meas_lab
             L_tgt,  a_tgt,  b_tgt  = target_lab
 
-            # Hue error: angular difference in the ab plane
-            hue_meas = math.atan2(b_meas, a_meas)
-            hue_tgt  = math.atan2(b_tgt,  a_tgt)
-            hue_err_deg = math.degrees(hue_tgt - hue_meas)
-            # Normalize to (-180, 180)
+            # Hue error: angular difference in the ab plane, normalized to (-180, 180)
+            hue_err_deg = math.degrees(math.atan2(b_tgt, a_tgt) - math.atan2(b_meas, a_meas))
             hue_err_deg = (hue_err_deg + 180) % 360 - 180
 
             # Saturation error: chroma ratio
-            chroma_meas = math.sqrt(a_meas ** 2 + b_meas ** 2)
-            chroma_tgt  = math.sqrt(a_tgt  ** 2 + b_tgt  ** 2)
+            chroma_meas = math.hypot(a_meas, b_meas)
+            chroma_tgt  = math.hypot(a_tgt,  b_tgt)
             sat_ratio_err = (chroma_tgt - chroma_meas) / max(chroma_tgt, 1e-6)
 
             # Luminance error
@@ -440,53 +465,21 @@ class CalibrationEngine:
             # Errors are (target - measured); a positive control value is assumed
             # to increase hue angle / saturation / luminance, so the correction
             # moves each property toward its target. If the projector's control
-            # direction is inverted on some axis, the divergence guard above
+            # direction is inverted on some axis, the loop's divergence guard
             # reverts to the best-known values instead of walking away.
-            hue_delta = round(hue_err_deg * step_scale)
-            sat_delta = round(sat_ratio_err * step_scale * 10)
-            lum_delta = round(lum_err * step_scale * 10)
-
-            new_cms = {
-                "HUE": cms["HUE"] + hue_delta,
-                "SAT": cms["SAT"] + sat_delta,
-                "LUM": cms["LUM"] + lum_delta,
+            return {
+                "HUE": current["HUE"] + round(hue_err_deg * step_scale),
+                "SAT": current["SAT"] + round(sat_ratio_err * step_scale * 10),
+                "LUM": current["LUM"] + round(lum_err * step_scale * 10),
             }
-            self._apply_cms(axis, cms, new_cms)
-            step_scale = self._decay_step(step_scale, de)
 
-        if not converged and not self._abort:
-            # Controls changed after the last reading (final-iteration correction
-            # or divergence revert) — re-measure once for an honest final result.
-            X, Y, Z = self.measure()
-            final_de = delta_e_2000(xyz_to_lab(*self._to_relative(X, Y, Z)), target_lab)
+        def apply(current: dict, new: dict) -> None:
+            self._apply_settings(axis, current, new,
+                                 {"HUE": "HUE", "SAT": "SAT", "LUM": "LUM"},
+                                 lambda prop, value: self.projector.set_cms(axis, prop, value))
 
-        if not converged:
-            logger.warning("CMS %s did not converge after %d iterations (ΔE=%.4f)",
-                           axis, iteration, final_de)
-
-        result = PatchResult(
-            patch_name=axis,
-            final_delta_e=final_de,
-            iterations=iteration,
-            converged=converged,
-            final_xyz=(X, Y, Z),
-            initial_delta_e=initial_de,
-        )
-        self.on_event({"event": "patch_done", "patch": axis, "delta_e": _de_or_none(final_de),
-                       "iterations": iteration, "converged": converged})
-        return result
-
-    def _apply_cms(self, axis: str, current: dict, new: dict) -> None:
-        """Send changed CMS values to the projector (unless dry-run); mutates `current`."""
-        for prop in ("HUE", "SAT", "LUM"):
-            if new[prop] != current[prop]:
-                self.on_event({
-                    "event": "correction", "patch": axis, "axis": prop,
-                    "before": current[prop], "after": new[prop],
-                })
-                if not self.dry_run:
-                    self.projector.set_cms(axis, prop, new[prop])
-                current[prop] = new[prop]
+        outcome = self._correction_loop(axis, "cms", cms, normalize, target_lab, corrections, apply)
+        return self._emit_patch_result(outcome, axis)
 
     # ------------------------------------------------------------------
     # Phase 3 — Verification
