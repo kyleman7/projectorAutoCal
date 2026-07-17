@@ -163,8 +163,6 @@ class TestLoadCommandTable(object):
         table = load_command_table()
         assert "white_balance" in table
         assert "cms" in table
-        # _note should be stripped
-        assert "_note" not in table
 
     def test_custom_path(self, tmp_path):
         data = {"white_balance": {"R": "WBGAINR", "G": "WBGAING", "B": "WBGAINB"}}
@@ -183,6 +181,15 @@ class TestLoadCommandTable(object):
         with pytest.raises(ConfigError, match="Invalid JSON"):
             load_command_table(str(p))
 
-    def test_note_stripped(self):
+    def test_note_marks_placeholder_table_as_incomplete(self):
+        """The shipped placeholder file keeps its _note marker, and that marker
+        makes is_command_table_complete report 'not probed yet' even though
+        every slot is filled (with unverified guesses)."""
+        from projector_cal.probe import is_command_table_complete
+
         table = load_command_table()
-        assert "_note" not in table
+        assert "_note" in table
+        assert is_command_table_complete(table) is False
+
+        probed = {k: v for k, v in table.items() if k != "_note"}
+        assert is_command_table_complete(probed) is True

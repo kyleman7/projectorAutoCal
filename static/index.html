@@ -31,42 +31,23 @@
     ================================================================ -->
     <div id="view-setup" class="view active">
 
-      <!-- AI Settings -->
-      <div class="card ai-card">
-        <div class="flex justify-between align-center mb-16">
-          <div class="card-title" style="margin:0">AI Agent Features</div>
-          <label class="toggle-switch" title="Enable/disable Claude AI agents">
-            <input type="checkbox" id="ai-enabled-toggle" onchange="onAIToggle(this.checked)">
-            <span class="toggle-track"><span class="toggle-thumb"></span></span>
-          </label>
-        </div>
-
-        <div id="ai-key-row" class="field">
-          <label>Anthropic API Key
-            <a href="https://console.anthropic.com/settings/keys" target="_blank"
-               style="color:var(--accent); font-size:11px; margin-left:6px; text-decoration:none">
-              Get key ↗
-            </a>
-          </label>
-          <div class="flex gap-8 align-center">
-            <input id="ai-api-key" type="password" placeholder="sk-ant-api03-..."
-                   style="flex:1" autocomplete="off">
-            <button class="btn btn-sm" onclick="toggleKeyVisibility()" id="key-vis-btn"
-                    title="Show/hide key">👁</button>
-          </div>
-        </div>
-
-        <div class="flex gap-8 align-center mt-8">
-          <button class="btn" onclick="saveAISettings()">Save</button>
-          <span id="ai-status-badge" class="badge badge-warn">Not configured</span>
-          <span id="ai-key-preview" class="text-dim text-mono" style="font-size:11px"></span>
-        </div>
-
-        <div class="mt-8 text-dim" style="font-size:12px; line-height:1.6">
-          When enabled: post-run analysis, live anomaly detection, profile comparison,
-          and setup validation use Claude. Disabled = full calibration still works,
-          AI cards show a graceful fallback. Key is stored locally and never sent
-          anywhere except Anthropic's API.
+      <!-- Workflow overview -->
+      <div class="card">
+        <div class="card-title">How calibration works</div>
+        <p class="text-dim mb-16" style="font-size:13px">
+          Work through the steps below from top to bottom. Green dots track your progress —
+          when every step is done, head to the <strong>Run</strong> tab and press Start.
+        </p>
+        <div class="workflow-strip">
+          <div class="workflow-step" id="ov-connect"><span class="dot"></span>Connect devices</div>
+          <span class="workflow-arrow">→</span>
+          <div class="workflow-step" id="ov-probe"><span class="dot"></span>Run probe</div>
+          <span class="workflow-arrow">→</span>
+          <div class="workflow-step" id="ov-place"><span class="dot"></span>Position colorimeter</div>
+          <span class="workflow-arrow">→</span>
+          <div class="workflow-step" id="ov-validate"><span class="dot"></span>Warm up &amp; validate</div>
+          <span class="workflow-arrow">→</span>
+          <div class="workflow-step" id="ov-run"><span class="dot"></span>Calibrate ▶</div>
         </div>
       </div>
 
@@ -75,7 +56,14 @@
         <div class="step-header">
           <div class="step-number">1</div>
           <div class="step-title">Device Connections</div>
+          <span class="step-status" id="step-status-connect"></span>
         </div>
+        <p class="text-dim mb-16" style="font-size:13px">
+          Enter the addresses of your projector and the Raspberry Pi running PGenerator
+          (or click <strong>Scan Network</strong> to find them automatically), then click
+          <strong>Save &amp; Test</strong>. Saving is what makes the calibration run use these
+          addresses — testing alone doesn't store them.
+        </p>
 
         <div class="field">
           <label>Projector Connection</label>
@@ -144,9 +132,10 @@
           <input id="spotread-path" type="text" value="spotread">
         </div>
 
-        <div class="flex gap-8 mt-16">
-          <button class="btn" onclick="testConnections()">Test All</button>
+        <div class="flex gap-8 mt-16 align-center">
+          <button class="btn" onclick="testConnections()">Save &amp; Test</button>
           <button class="btn" onclick="startDiscovery()">Scan Network</button>
+          <span id="config-save-status" class="text-dim" style="font-size:12px"></span>
         </div>
 
         <!-- Discovery results -->
@@ -161,11 +150,28 @@
         </div>
       </div>
 
-      <!-- Step 2: Screen Info -->
+      <!-- Step 2: Command Probe -->
       <div class="card">
         <div class="step-header">
           <div class="step-number">2</div>
-          <div class="step-title">Screen Information</div>
+          <div class="step-title">Command Probe (first run only)</div>
+          <span class="step-status" id="step-status-probe"></span>
+        </div>
+        <p class="text-dim mb-16" style="font-size:13px">
+          Epson doesn't publish the 5040UB's command names, and they vary by firmware.
+          The probe asks your projector which tokens it understands and saves them to
+          <code>configs/command_table.json</code> — calibration can't adjust anything
+          without them. Run it once; the green check sticks for future sessions.
+        </p>
+        <button class="btn" onclick="runProbe()">Run Probe</button>
+        <div id="probe-output" class="log mt-16 hidden"></div>
+      </div>
+
+      <!-- Step 3: Screen Info -->
+      <div class="card">
+        <div class="step-header">
+          <div class="step-number">3</div>
+          <div class="step-title">Screen Information <span class="text-dim" style="font-weight:400; font-size:12px">(optional — saved into profiles for reference)</span></div>
         </div>
 
         <div class="field-row">
@@ -190,11 +196,12 @@
         </div>
       </div>
 
-      <!-- Step 3: Colorimeter Placement -->
+      <!-- Step 4: Colorimeter Placement -->
       <div class="card">
         <div class="step-header">
-          <div class="step-number">3</div>
+          <div class="step-number">4</div>
           <div class="step-title">Colorimeter Placement (CCDIS3)</div>
+          <span class="step-status" id="step-status-place"></span>
         </div>
 
         <ul class="checklist">
@@ -230,7 +237,7 @@
             <span class="check-icon" id="placement-check">⚪</span>
             <div>
               <div>
-                <input type="checkbox" id="placement-confirm" onchange="document.getElementById('placement-check').textContent = this.checked ? '✅' : '⚪'">
+                <input type="checkbox" id="placement-confirm" onchange="onPlacementConfirm(this.checked)">
                 <label for="placement-confirm" style="display:inline; cursor:pointer;">
                   Colorimeter is positioned on tripod, aimed at screen center, room is darkened
                 </label>
@@ -240,12 +247,13 @@
         </ul>
       </div>
 
-      <!-- Step 4: Warm-up Monitor -->
+      <!-- Step 5: Warm-up + Validation -->
       <div class="card">
         <div class="step-header">
-          <div class="step-number">4</div>
-          <div class="step-title">Projector Warm-up</div>
-          <span id="warmup-badge" class="badge badge-warn ml-auto" style="margin-left:auto">Warming Up</span>
+          <div class="step-number">5</div>
+          <div class="step-title">Warm-up &amp; Pre-flight Check</div>
+          <span class="step-status" id="step-status-validate"></span>
+          <span id="warmup-badge" class="badge badge-warn" style="margin-left:8px">Warming Up</span>
         </div>
 
         <p class="text-dim mb-16" style="font-size:13px">
@@ -270,18 +278,43 @@
         </div>
       </div>
 
-      <!-- Step 4: Probe -->
-      <div class="card">
-        <div class="step-header">
-          <div class="step-number">★</div>
-          <div class="step-title">Command Table (First Run Only)</div>
+      <!-- Optional: AI settings -->
+      <div class="card ai-card">
+        <div class="flex justify-between align-center mb-16">
+          <div class="card-title" style="margin:0">AI Assistance <span class="text-dim" style="font-weight:400; font-size:12px">(optional)</span></div>
+          <label class="toggle-switch" title="Enable/disable Claude AI agents">
+            <input type="checkbox" id="ai-enabled-toggle" onchange="onAIToggle(this.checked)">
+            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+          </label>
         </div>
-        <p class="text-dim mb-16" style="font-size:13px">
-          Run the probe once to auto-discover the ESC/VP21 command tokens for your specific
-          5040UB firmware. Results are saved to <code>configs/command_table.json</code>.
-        </p>
-        <button class="btn" onclick="runProbe()">Run Probe</button>
-        <div id="probe-output" class="log mt-16 hidden"></div>
+
+        <div id="ai-key-row" class="field">
+          <label>Anthropic API Key
+            <a href="https://console.anthropic.com/settings/keys" target="_blank"
+               style="color:var(--accent); font-size:11px; margin-left:6px; text-decoration:none">
+              Get key ↗
+            </a>
+          </label>
+          <div class="flex gap-8 align-center">
+            <input id="ai-api-key" type="password" placeholder="sk-ant-api03-..."
+                   style="flex:1" autocomplete="off">
+            <button class="btn btn-sm" onclick="toggleKeyVisibility()" id="key-vis-btn"
+                    title="Show/hide key">👁</button>
+          </div>
+        </div>
+
+        <div class="flex gap-8 align-center mt-8">
+          <button class="btn" onclick="saveAISettings()">Save</button>
+          <span id="ai-status-badge" class="badge badge-warn">Not configured</span>
+          <span id="ai-key-preview" class="text-dim text-mono" style="font-size:11px"></span>
+        </div>
+
+        <div class="mt-8 text-dim" style="font-size:12px; line-height:1.6">
+          When enabled: post-run analysis, live anomaly detection, profile comparison,
+          and setup validation use Claude. Disabled = full calibration still works,
+          AI cards show a graceful fallback. Key is stored locally and never sent
+          anywhere except Anthropic's API.
+        </div>
       </div>
 
     </div><!-- /setup view -->
@@ -291,6 +324,8 @@
          VIEW: Run Dashboard
     ================================================================ -->
     <div id="view-run" class="view">
+
+      <div id="run-readiness" class="hidden"></div>
 
       <div class="card">
         <div class="flex align-center gap-16 mb-16">
@@ -319,6 +354,14 @@
             <button class="btn btn-success" id="start-btn" onclick="startRun()">Start</button>
             <button class="btn btn-danger hidden" id="stop-btn" onclick="stopRun()">Stop</button>
           </div>
+        </div>
+
+        <div class="text-dim mb-16" style="font-size:12px; line-height:1.7">
+          <strong>First time?</strong> Tick <em>Dry Run</em> to watch the full measure-and-correct
+          loop without changing anything on the projector.
+          <em>All</em> runs the three phases in order: white balance → color correction (CMS) →
+          a final verification pass. The projector stores SDR and HDR10 settings separately,
+          so calibrate each mode in its own session.
         </div>
 
         <!-- Progress -->

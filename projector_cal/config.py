@@ -292,6 +292,8 @@ def load_command_table(path: str | None = None) -> dict:
     except json.JSONDecodeError as e:
         raise ConfigError(f"Invalid JSON in command table '{resolved}': {e}") from e
 
-    # Strip the _note annotation if present (placeholder file)
-    table.pop("_note", None)
+    # Keep the "_note" annotation: its presence marks the shipped placeholder
+    # file, which lets is_command_table_complete() report "not probed yet".
+    # The probe overwrites the file without it. Command lookups access known
+    # keys only, so the extra key is harmless downstream.
     return table

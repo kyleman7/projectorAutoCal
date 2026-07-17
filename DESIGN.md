@@ -162,12 +162,28 @@ Rec.709 and P3 color primaries are defined under D65.
 **Rule**: ignore spotread's Lab values entirely. Convert raw XYZ to Lab under D65:
 
 ```python
-xyz = XYZColor(float(X), float(Y), float(Z), illuminant="d65")
+# XYZColor is on the 0–1 nominal scale (reference white ≈ 0.95047, 1.0, 1.08883).
+# Divide Y=100-scale values by 100 first — passing them raw yields L*≈522 for white.
+xyz = XYZColor(float(X) / 100, float(Y) / 100, float(Z) / 100, illuminant="d65")
 lab = convert_color(xyz, LabColor)
 ```
 
 **The `float()` cast is mandatory.** python-colormath silently computes
 wrong ΔE when passed numpy scalars — the cast forces Python-native floats.
+
+**numpy compatibility**: python-colormath 3.0 calls `numpy.asscalar()`, removed
+in numpy 1.23. `color_math.py` installs a shim (`np.asscalar = lambda a: a.item()`)
+before importing colormath; without it every ΔE call raises AttributeError.
+
+### Relative colorimetry (critical)
+
+spotread returns **absolute** XYZ in cd/m². Every target in this project is
+**relative to white = 100**. The engine therefore measures a reference white
+(end of Phase 1, or a dedicated white measurement at the start of Phase 2/3)
+and rescales every subsequent reading by `100 / Y_white` before computing Lab
+or ΔE. Comparing raw absolute readings against the target tables makes ΔE
+luminance-dominated and the loop cannot converge — a dim-but-perfect projector
+would never pass.
 
 ### D65 reference white (Y=100 scale)
 
@@ -199,8 +215,11 @@ means the projector's white point is not D65.
 HDR10 white is D65 — **not** DCI native (0.314, 0.351). The 5040UB targets
 D65 in HDR mode.
 
-Secondary and neutral targets (cyan, magenta, yellow, grey75, grey50) are
-derived from the primaries and stored in `color_math.py`.
+Secondary targets (cyan, magenta, yellow) are **derived programmatically at
+import time** by summing the XYZ of their constituent primaries
+(`color_math._build_targets`) — never hardcode them; hardcoded HDR10
+secondaries were once several ΔE off. Neutral targets (grey75, grey50) sit on
+the D65 axis with gamma-2.2 luminance.
 
 ---
 
@@ -212,15 +231,18 @@ Goal: make the white patch chromaticity match D65 (x=0.3127, y=0.3290).
 
 ```
 display white patch (RGB 255,255,255)
+target_X, target_Y, target_Z = xyY_to_XYZ(0.3127, 0.3290, 100)   # loop-invariant
 
 for each iteration:
     X, Y, Z = measure()
-    meas_x, meas_y, _ = XYZ_to_xyY(X, Y, Z)
-    target_X, target_Y, target_Z = xyY_to_XYZ(0.3127, 0.3290, Y)  # keep Y fixed
+    scale = 100 / Y                       # normalize reading to Y=100:
+    Xn, Yn, Zn = X·scale, Y·scale, Z·scale  # chromaticity-only comparison
+    ΔE = delta_e_2000(lab(Xn, Yn, Zn), lab(target))
+    converged / divergence-guard / anomaly checks (see shared loop below)
 
-    r_err = (X - target_X) / target_X
-    g_err = (Y - target_Y) / target_Y
-    b_err = (Z - target_Z) / target_Z
+    r_err = (Xn - target_X) / target_X
+    g_err = (Yn - target_Y) / target_Y     # ≡ 0 — G is the fixed reference
+    b_err = (Zn - target_Z) / target_Z
 
     new_R = R_gain - round(r_err × step_scale × gain_range)
     new_G = G_gain - round(g_err × step_scale × gain_range)
@@ -228,11 +250,13 @@ for each iteration:
 
     clamp each to [wb_gain_range[0], wb_gain_range[1]]
     send corrections if changed
-    step_scale = max(min_gain, step_scale × (ΔE / threshold) × 0.5)
+    step_scale = min(initial, max(minimum, step_scale × (ΔE / threshold) × 0.5))
 ```
 
-The G channel acts as the luminance reference. Holding G near 128 while
-adjusting R and B corrects tint without shifting overall brightness.
+The G channel acts as the luminance reference (its error is 0 by construction
+after normalization); adjusting R and B corrects tint without shifting overall
+brightness. The last white reading's Y becomes the reference white that anchors
+relative colorimetry in Phases 2 and 3.
 
 ### Phase 2: CMS (6 axes)
 
@@ -251,13 +275,20 @@ sat_ratio   = (chroma_tgt - chroma_meas) / chroma_tgt
 
 lum_err     = (L_tgt - L_meas) / 100
 
-hue_delta = -round(hue_err × step_scale)
-sat_delta = -round(sat_ratio × step_scale × 10)
-lum_delta = -round(lum_err × step_scale × 10)
+hue_delta = +round(hue_err × step_scale)
+sat_delta = +round(sat_ratio × step_scale × 10)
+lum_delta = +round(lum_err × step_scale × 10)
 ```
 
+**Sign convention**: errors are (target − measured), and a positive control
+value is assumed to increase hue angle / saturation / luminance — so each
+delta moves the property *toward* its target. Do not negate the deltas (an
+earlier revision did, which walks *away* from the target); if a projector axis
+turns out inverted, the divergence guard below reverts instead of running away.
+
 The ×10 scaling on sat/lum reflects typical CMS range (±50 or ±100)
-vs typical Hue range (±180 degrees → ±50 units).
+vs typical Hue range (±180 degrees → ±50 units). Each CMS measurement is
+normalized against the Phase-1 reference white before computing Lab.
 
 ### Phase 3: Verification
 
@@ -265,18 +296,38 @@ Read-only measurement pass. Measures all 9 patches (white + 6 primaries/secondar
 
 Ends with `display_black()`.
 
-### Step scale decay
+### Step scale decay (clamped)
 
 ```
-step_scale_new = max(proportional_gain_minimum,
-                     step_scale × (ΔE / threshold) × 0.5)
+step_scale_new = min(proportional_gain_initial,
+                     max(proportional_gain_minimum,
+                         step_scale × (ΔE / threshold) × 0.5))
 ```
 
-When ΔE = 2× threshold: scale reduces by 0 (2/1 × 0.5 = 1.0 — no change).
+When ΔE = 2× threshold: the raw formula is neutral (2 × 0.5 = 1.0 — no change).
+Above that it would *grow* the step without bound and destabilize the loop —
+which is why the result is clamped to the initial value.
 When ΔE = threshold: scale halves each iteration.
-When ΔE < threshold: loop exits before next decay.
+When ΔE < threshold: loop exits before the next decay.
 
 This prevents oscillation when close to target without requiring PID tuning.
+
+### Shared loop safety (both correction phases)
+
+Both phases run through one driver (`engine._correction_loop`) which adds two
+protections around the proportional controller:
+
+- **Divergence guard** — if ΔE fails to improve for 3 consecutive iterations,
+  the loop reverts the projector to the best-known settings and stops the
+  patch. This bounds the damage from an unstable loop or a wrong
+  control-direction assumption.
+- **Honest final result** — when a loop ends without converging (divergence
+  revert or max iterations), the settings changed *after* the last reading, so
+  the engine re-measures once and reports ΔE/XYZ for the projector's actual
+  final state. This also keeps the Phase-1 white reference accurate.
+
+An optional anomaly hook (see Agents) is consulted every 3rd iteration and may
+retry a measurement or abort the patch.
 
 ---
 
@@ -440,24 +491,27 @@ Example: `Post_calibration_SDR_sdr_20250401_142300.json`
 
 ### Output format
 
-All agents use `output_config.format.type = "json_schema"` for structured output.
-The `json_schema.strict = True` flag enforces the schema — unknown keys are rejected.
-
-To parse the response:
+All agents request structured output through the shared helper
+`agents.base.request_structured(model, prompt, schema, max_tokens, thinking)`,
+which sends:
 
 ```python
-for block in response.content:
-    if hasattr(block, "text"):
-        return json.loads(block.text)
+output_config={"format": {"type": "json_schema", "schema": SCHEMA}}
 ```
 
-Thinking blocks (`type="thinking"`) come before text blocks — skip them.
+(No nested `json_schema`/`name`/`strict` wrapper — that older shape is
+obsolete and rejected by the current API. Schemas enforce structure via
+`additionalProperties: false` + `required` inside the schema itself.)
+
+The helper also extracts the reply — thinking blocks (`block.type ==
+"thinking"`) come before text blocks; it returns `json.loads()` of the first
+`block.type == "text"` block. Don't duplicate this parsing in agent modules.
 
 ### Adaptive thinking
 
 `thinking={"type": "adaptive"}` lets the model decide when extended thinking
 is worth the extra tokens. Only used for Opus agents on complex reasoning tasks
-(results_analyst, profile_advisor). Never use on Haiku — not supported.
+(results_analyst, profile_advisor). Not used on Haiku.
 
 ### Cost estimates (2025 pricing)
 
