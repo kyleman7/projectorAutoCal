@@ -1,7 +1,8 @@
-"""Shared Anthropic client and model constants for all calibration agents."""
+"""Shared Anthropic client, request helper, and model constants for all agents."""
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 
@@ -48,3 +49,37 @@ def _agent_unavailable(reason: str) -> dict:
     """Return a graceful degradation dict when the agent cannot run."""
     logger.warning("Agent unavailable: %s", reason)
     return {"error": reason, "available": False}
+
+
+def request_structured(
+    model: str,
+    prompt: str,
+    schema: dict,
+    max_tokens: int,
+    thinking: bool = False,
+) -> dict:
+    """Send a one-shot prompt with structured JSON output and parse the reply.
+
+    Shared by all agents so the request shape (output_config json_schema
+    format) and the text-block extraction live in exactly one place.
+
+    Raises:
+        EnvironmentError: ANTHROPIC_API_KEY is not set.
+        ImportError: the anthropic package is not installed.
+        ValueError: the response contained no text block.
+        Anything the SDK raises for transport/API errors.
+    """
+    client = get_client()
+    kwargs: dict = {"thinking": {"type": "adaptive"}} if thinking else {}
+    response = client.messages.create(
+        model=model,
+        max_tokens=max_tokens,
+        output_config={"format": {"type": "json_schema", "schema": schema}},
+        messages=[{"role": "user", "content": prompt}],
+        **kwargs,
+    )
+    # Find the text content block (thinking blocks come first)
+    for block in response.content:
+        if block.type == "text":
+            return json.loads(block.text)
+    raise ValueError("No text block in model response")

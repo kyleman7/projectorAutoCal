@@ -13,7 +13,6 @@ Returns an action for the engine to take:
 
 from __future__ import annotations
 
-import json
 import logging
 import math
 
@@ -63,7 +62,7 @@ def detect_anomaly(
     Returns:
         dict with keys: anomaly (bool), type (str|None), action (str), reason (str).
     """
-    from .base import MODEL_HAIKU, _agent_unavailable, get_client
+    from .base import MODEL_HAIKU, request_structured
 
     variance = _y_variance(recent_xyz)
     if variance < _Y_VARIANCE_THRESHOLD:
@@ -73,14 +72,6 @@ def detect_anomaly(
             "action": "continue",
             "reason": f"Y variance {variance:.2%} is below threshold",
         }
-
-    try:
-        client = get_client()
-    except (EnvironmentError, ImportError) as e:
-        # If agent unavailable, default to continue — don't block calibration
-        logger.warning("anomaly_detector unavailable: %s — defaulting to continue", e)
-        return {"anomaly": False, "type": None, "action": "continue",
-                "reason": f"Agent unavailable: {e}"}
 
     xyz_str = "\n".join(
         f"  Reading {i+1}: X={x:.3f} Y={y:.3f} Z={z:.3f} ΔE={de:.3f}"
@@ -104,21 +95,12 @@ Common anomaly types:
 Recommend an action: continue, retry_measurement, pause_and_check, or abort_patch."""
 
     try:
-        response = client.messages.create(
-            model=MODEL_HAIKU,
-            max_tokens=256,
-            output_config={
-                "format": {
-                    "type": "json_schema",
-                    "schema": _OUTPUT_SCHEMA,
-                }
-            },
-            messages=[{"role": "user", "content": prompt}],
-        )
-        for block in response.content:
-            if block.type == "text":
-                return json.loads(block.text)
-        return {"anomaly": False, "type": None, "action": "continue", "reason": "No response text"}
+        return request_structured(MODEL_HAIKU, prompt, _OUTPUT_SCHEMA, max_tokens=256)
+    except (EnvironmentError, ImportError) as e:
+        # If agent unavailable, default to continue — don't block calibration
+        logger.warning("anomaly_detector unavailable: %s — defaulting to continue", e)
+        return {"anomaly": False, "type": None, "action": "continue",
+                "reason": f"Agent unavailable: {e}"}
     except Exception as e:
         logger.exception("anomaly_detector failed")
         return {"anomaly": False, "type": None, "action": "continue",

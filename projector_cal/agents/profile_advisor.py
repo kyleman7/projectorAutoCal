@@ -8,7 +8,6 @@ Uses claude-opus-4-8 with adaptive thinking.
 
 from __future__ import annotations
 
-import json
 import logging
 
 logger = logging.getLogger(__name__)
@@ -37,12 +36,7 @@ def compare_profiles(profile_a: "CalibrationProfile", profile_b: "CalibrationPro
         dict with keys: narrative, delta_e_delta, verdict, notable_changes.
         Falls back to {"error": ..., "available": False} on failure.
     """
-    from .base import MODEL_OPUS, _agent_unavailable, get_client
-
-    try:
-        client = get_client()
-    except (EnvironmentError, ImportError) as e:
-        return _agent_unavailable(str(e))
+    from .base import MODEL_OPUS, _agent_unavailable, request_structured
 
     def _fmt_wb(gains: dict) -> str:
         return "  " + "  ".join(f"{ch}={v}" for ch, v in sorted(gains.items()))
@@ -97,24 +91,11 @@ axes improved or degraded. Note any large WB or CMS changes that suggest
 hardware drift or a re-calibration was needed."""
 
     try:
-        response = client.messages.create(
-            model=MODEL_OPUS,
-            max_tokens=1024,
-            thinking={"type": "adaptive"},
-            output_config={
-                "format": {
-                    "type": "json_schema",
-                    "schema": _OUTPUT_SCHEMA,
-                }
-            },
-            messages=[{"role": "user", "content": prompt}],
-        )
-        for block in response.content:
-            if block.type == "text":
-                result = json.loads(block.text)
-                result["delta_e_delta"] = de_delta  # inject computed table
-                return result
-        return _agent_unavailable("No text block in response")
+        result = request_structured(MODEL_OPUS, prompt, _OUTPUT_SCHEMA, max_tokens=1024, thinking=True)
+        result["delta_e_delta"] = de_delta  # inject computed table
+        return result
+    except (EnvironmentError, ImportError) as e:
+        return _agent_unavailable(str(e))
     except Exception as e:
         logger.exception("profile_advisor failed")
         return _agent_unavailable(f"Agent error: {e}")

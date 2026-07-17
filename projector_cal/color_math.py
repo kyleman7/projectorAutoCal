@@ -24,8 +24,9 @@ from colormath.color_diff import delta_e_cie2000
 from colormath.color_objects import LabColor, XYZColor
 from colormath.color_conversions import convert_color
 
-# D65 reference white (XYZ, Y=100 scale)
-_D65_XYZ = (95.047, 100.000, 108.883)
+# D65 reference white (XYZ, Y=100 scale) — public so tests and simulations
+# share one definition of the white point
+D65_WHITE_XYZ = (95.047, 100.000, 108.883)
 _D65_WHITE_xy = (0.3127, 0.3290)
 
 # ---- Primary targets (xyY) ------------------------------------------------------

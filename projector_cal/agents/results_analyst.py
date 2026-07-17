@@ -11,7 +11,6 @@ Uses claude-opus-4-8 with adaptive thinking and structured JSON output.
 
 from __future__ import annotations
 
-import json
 import logging
 
 logger = logging.getLogger(__name__)
@@ -39,12 +38,7 @@ def analyze_results(report: "CalibrationReport") -> dict:  # type: ignore[name-d
         dict with keys: summary, issues, recommendations, overall_grade.
         Falls back to {"error": ..., "available": False} if the agent cannot run.
     """
-    from .base import MODEL_OPUS, _agent_unavailable, get_client
-
-    try:
-        client = get_client()
-    except (EnvironmentError, ImportError) as e:
-        return _agent_unavailable(str(e))
+    from .base import MODEL_OPUS, _agent_unavailable, request_structured
 
     patch_rows = []
     for p in report.verify_results or report.patches:
@@ -77,23 +71,9 @@ Be specific and concise. Reference patch names directly.
 Grade as Excellent (all ΔE < 0.5), Good (all < 1.0), Acceptable (≤2 patches > 1.0), Poor (otherwise)."""
 
     try:
-        response = client.messages.create(
-            model=MODEL_OPUS,
-            max_tokens=1024,
-            thinking={"type": "adaptive"},
-            output_config={
-                "format": {
-                    "type": "json_schema",
-                    "schema": _OUTPUT_SCHEMA,
-                }
-            },
-            messages=[{"role": "user", "content": prompt}],
-        )
-        # Find the text content block (thinking blocks come first)
-        for block in response.content:
-            if block.type == "text":
-                return json.loads(block.text)
-        return _agent_unavailable("No text block in response")
+        return request_structured(MODEL_OPUS, prompt, _OUTPUT_SCHEMA, max_tokens=1024, thinking=True)
+    except (EnvironmentError, ImportError) as e:
+        return _agent_unavailable(str(e))
     except Exception as e:
         logger.exception("results_analyst failed")
         return _agent_unavailable(f"Agent error: {e}")
