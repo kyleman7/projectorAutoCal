@@ -59,19 +59,11 @@ def validate_setup(
         dict with keys: ready (bool), checklist (list), blocking_issues (list).
         Falls back gracefully if agent unavailable.
     """
+    from ..probe import is_command_table_complete
     from .base import MODEL_HAIKU, request_structured
 
     # Check command table completeness locally (no LLM needed for this)
-    wb_ok = all(
-        command_table.get("white_balance", {}).get(ch)
-        for ch in ("R", "G", "B")
-    )
-    cms_ok = all(
-        command_table.get("cms", {}).get(axis, {}).get(prop)
-        for axis in ["red", "green", "blue", "cyan", "magenta", "yellow"]
-        for prop in ("HUE", "SAT", "LUM")
-    )
-    command_table_complete = wb_ok and cms_ok
+    command_table_complete = is_command_table_complete(command_table)
 
     screen_desc = (
         f"Diagonal: {screen_info.get('diagonal_inches', 'unknown')} inches, "

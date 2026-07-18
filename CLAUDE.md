@@ -285,6 +285,7 @@ All engine events are broadcast as JSON objects. Key events:
 | POST   | `/api/discover` | Start mDNS + port scan |
 | GET    | `/api/discover/last` | Load cached scan results |
 | POST   | `/api/discover/confirm/{ip}` | Verify a specific device (`{device_type}`) |
+| GET    | `/api/setup/status` | Lightweight readiness facts: `{command_table_complete, colorimeter_available}` — drives the guided-setup UI |
 | POST   | `/api/setup/validate` | Run pre-flight checklist |
 | POST   | `/api/test-connection` | Test projector or pgen TCP connection |
 | WS     | `/ws` | WebSocket for live event stream |
@@ -386,7 +387,7 @@ Results cached to `discovery/last_scan.json` (gitignored).
 
 6. **PGenerator has no ACK**: After sending 3 bytes, there is no response. An open TCP connection and no `OSError` = success.
 
-7. **command_table.json must be probed first**: The default file has placeholder token names. Run `/api/probe` (or `projector-cal --probe` if CLI mode added) before first calibration.
+7. **command_table.json must be probed first**: The default file has placeholder token names. Run `/api/probe` (or `projector-cal --probe` if CLI mode added) before first calibration. The placeholder file carries a `"_note"` key which `load_command_table` deliberately preserves — `probe.is_command_table_complete()` treats its presence as "not probed yet" (the probe writes the table without it). Do not strip `_note` on load.
 
 8. **SDR and HDR settings are independent on 5040UB**: Calibrating in SDR does not affect HDR settings and vice versa. Run separate calibration sessions for each mode.
 
@@ -436,8 +437,8 @@ python -m projector_cal
 
 | Tab | Key features |
 |-----|-------------|
-| **Setup** | IP config, network scan + device cards, screen info, colorimeter placement checklist, warm-up Y monitor, probe button, pre-flight validation |
-| **Run** | Mode/phase selector, dry-run toggle, start/stop, patch grid with live ΔE, progress bar, live log |
+| **Setup** | Guided flow: workflow progress strip, then numbered steps — 1 connections (Save & Test persists fields via POST /api/config; the run reads the saved config, not the fields), 2 command probe, 3 screen info (optional), 4 placement checklist, 5 warm-up + pre-flight validation; AI settings card at the bottom. Step checkmarks driven by GET /api/setup/status + client state |
+| **Run** | Readiness banner (warns if command table unprobed or colorimeter unavailable on host), mode/phase selector with first-run guidance, dry-run toggle, start/stop (Start re-saves Setup fields first), patch grid with live ΔE, progress bar, live log |
 | **Before/After** | ΔE comparison table (before = initial ΔE, after = verify pass), AI Analysis card (grade + issues + recommendations) |
 | **Profiles** | Grouped by mode, apply/delete buttons, save-current-state, AI profile comparison |
 

@@ -18,6 +18,17 @@ const state = {
   donePatches: 0,
 };
 
+// Guided-setup progress. Drives the workflow strip, the per-step checkmarks,
+// and the Run tab readiness banner.
+const setupState = {
+  connections: false,          // Save & Test passed for projector + PGenerator
+  probe: false,                // command table complete (probed or preloaded)
+  placement: false,            // placement checklist confirmed
+  validated: false,            // pre-flight validation returned ready
+  calibrated: false,           // at least one run completed this session
+  colorimeterAvailable: null,  // null = unknown, false = POSIX-only host problem
+};
+
 const PATCH_COLORS = {
   white:   '#ffffff', red:    '#ff2020', green:  '#20dd20',
   blue:    '#2060ff', cyan:   '#00e8e8', magenta:'#ff00ff',
@@ -37,8 +48,124 @@ document.querySelectorAll('nav button').forEach(btn => {
     btn.classList.add('active');
     document.getElementById('view-' + btn.dataset.view).classList.add('active');
     if (btn.dataset.view === 'profiles') loadProfiles();
+    if (btn.dataset.view === 'run') refreshSetupStatus().then(renderRunReadiness);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Guided setup — progress tracking and readiness
+// ---------------------------------------------------------------------------
+
+function updateSetupProgress() {
+  const steps = [
+    ['ov-connect',  'step-status-connect',  setupState.connections],
+    ['ov-probe',    'step-status-probe',    setupState.probe],
+    ['ov-place',    'step-status-place',    setupState.placement],
+    ['ov-validate', 'step-status-validate', setupState.validated],
+    ['ov-run',      null,                   setupState.calibrated],
+  ];
+  steps.forEach(([ovId, statusId, done]) => {
+    const ov = document.getElementById(ovId);
+    if (ov) ov.classList.toggle('done', !!done);
+    if (statusId) {
+      const el = document.getElementById(statusId);
+      if (el) el.textContent = done ? '✓ done' : '';
+    }
+  });
+}
+
+async function refreshSetupStatus() {
+  try {
+    const res = await fetch('/api/setup/status');
+    const data = await res.json();
+    setupState.probe = !!data.command_table_complete;
+    setupState.colorimeterAvailable = !!data.colorimeter_available;
+  } catch { /* leave last-known state */ }
+  updateSetupProgress();
+}
+
+function renderRunReadiness() {
+  const el = document.getElementById('run-readiness');
+  if (!el) return;
+  const warnings = [];
+  if (!setupState.probe) {
+    warnings.push('The command table is incomplete — run the <strong>Probe</strong> ' +
+                  '(Setup, step 2) first. Corrections can’t be sent without it.');
+  }
+  if (setupState.colorimeterAvailable === false) {
+    warnings.push('No colorimeter driver on this machine (Linux/macOS only) — ' +
+                  'only <strong>Dry Run</strong> will work here.');
+  }
+  el.classList.remove('hidden');
+  if (warnings.length) {
+    el.className = 'banner banner-warn';
+    el.innerHTML = warnings.map(w => '⚠ ' + w).join('<br>');
+  } else {
+    el.className = 'banner banner-ok';
+    el.innerHTML = '✓ Setup looks good. Pick a mode and press Start — or tick Dry Run to rehearse safely.';
+  }
+}
+
+function onPlacementConfirm(checked) {
+  document.getElementById('placement-check').textContent = checked ? '✅' : '⚪';
+  setupState.placement = checked;
+  updateSetupProgress();
+}
+
+// ---------------------------------------------------------------------------
+// Config load/save — the Setup fields ARE the config the run uses
+// ---------------------------------------------------------------------------
+
+async function loadConfigIntoFields() {
+  try {
+    const res = await fetch('/api/config');
+    const cfg = await res.json();
+    document.getElementById('proj-ip').value      = cfg.projector.host || '';
+    document.getElementById('proj-port').value    = cfg.projector.port;
+    document.getElementById('pgen-ip').value      = cfg.pgen.host || '';
+    document.getElementById('pgen-port').value    = cfg.pgen.port;
+    document.getElementById('spotread-path').value = cfg.colorimeter.spotread_path;
+    document.getElementById('serial-baud').value  = cfg.projector.serial_baud;
+    if (cfg.projector.transport === 'serial') {
+      document.querySelector('input[name="proj-transport"][value="serial"]').checked = true;
+      setTransport('serial');
+    }
+  } catch { /* keep placeholders */ }
+}
+
+async function saveConfigFromFields() {
+  const statusEl = document.getElementById('config-save-status');
+  const body = {
+    config: {
+      projector: {
+        host: v('proj-ip'),
+        port: parseInt(v('proj-port')) || 3629,
+        transport: getTransport(),
+        serial_port: v('serial-port-select'),
+        serial_baud: parseInt(v('serial-baud')) || 9600,
+      },
+      pgen: { host: v('pgen-ip'), port: parseInt(v('pgen-port')) || 85 },
+      colorimeter: { spotread_path: v('spotread-path') || 'spotread' },
+    },
+  };
+  try {
+    const res = await fetch('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (res.ok) {
+      if (statusEl) statusEl.textContent = 'Saved ✓';
+      return true;
+    }
+    const err = await res.json().catch(() => ({}));
+    if (statusEl) statusEl.textContent = 'Not saved: ' + (err.detail || res.statusText);
+    return false;
+  } catch (e) {
+    if (statusEl) statusEl.textContent = 'Not saved: ' + e.message;
+    return false;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // WebSocket
@@ -109,6 +236,10 @@ function handleEvent(ev) {
       state.runReport = ev.report;
       finishRun();
       renderResults(ev.report);
+      if (!ev.report.aborted) {
+        setupState.calibrated = true;
+        updateSetupProgress();
+      }
       break;
 
     case 'error':
@@ -122,6 +253,8 @@ function handleEvent(ev) {
 
     case 'probe_done':
       appendProbeLog('✓ Probe complete. Missing: ' + (ev.missing.length ? ev.missing.join(', ') : 'none'));
+      setupState.probe = ev.missing.length === 0;
+      updateSetupProgress();
       break;
 
     case 'discovery_start':
@@ -194,6 +327,11 @@ function getTransport() {
 // ---------------------------------------------------------------------------
 
 async function testConnections() {
+  // Persist the fields first — the calibration run reads the saved config,
+  // not the input fields, so testing without saving would be misleading.
+  const saved = await saveConfigFromFields();
+  if (!saved) return;
+
   const transport = getTransport();
   const checks = [
     {
@@ -212,6 +350,7 @@ async function testConnections() {
   ul.innerHTML = '';
   document.getElementById('conn-results').classList.remove('hidden');
 
+  let allOk = true;
   for (const c of checks) {
     const li = document.createElement('li');
     li.innerHTML = `<span class="check-icon"><span class="spinner"></span></span><div>${c.label} (${c.ip}:${c.port})</div>`;
@@ -233,12 +372,16 @@ async function testConnections() {
       const data = await res.json();
       li.querySelector('.check-icon').textContent = data.connected ? '✅' : '❌';
       if (!data.connected) {
+        allOk = false;
         li.querySelector('div').innerHTML += `<div class="check-note">${data.error || 'Connection refused'}</div>`;
       }
     } catch (e) {
+      allOk = false;
       li.querySelector('.check-icon').textContent = '❌';
     }
   }
+  setupState.connections = allOk;
+  updateSetupProgress();
 }
 
 async function startDiscovery() {
@@ -408,7 +551,10 @@ async function validateSetup() {
     method: 'POST', headers: {'Content-Type':'application/json'},
     body: JSON.stringify(body),
   });
-  renderValidation(await res.json());
+  const result = await res.json();
+  renderValidation(result);
+  setupState.validated = !!result.ready;
+  updateSetupProgress();
 }
 
 function renderValidation(result) {
@@ -518,6 +664,17 @@ function logLine(msg, cls = '') {
 }
 
 async function startRun() {
+  // The run reads the saved server config — persist the Setup fields first so
+  // Start always targets the addresses the user can see on screen.
+  const saved = await saveConfigFromFields();
+  if (!saved) {
+    const el = document.getElementById('run-readiness');
+    el.className = 'banner banner-warn';
+    el.classList.remove('hidden');
+    el.textContent = '⚠ Could not save the Setup values — fix the fields in the Setup tab, then Start again.';
+    return;
+  }
+
   initPatchGrid();
   document.getElementById('run-progress-wrap').classList.remove('hidden');
   document.getElementById('start-btn').classList.add('hidden');
@@ -798,6 +955,8 @@ function handleAISettingsChanged(ev) {
 initPatchGrid();
 connectWS();
 loadAISettings();
+loadConfigIntoFields();
+refreshSetupStatus();
 
 // Load last discovery results on startup
 fetch('/api/discover/last').then(r => r.json()).then(data => {

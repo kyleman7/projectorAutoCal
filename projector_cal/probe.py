@@ -66,6 +66,28 @@ PICTURE_MODE_CANDIDATES: dict[str, list[str]] = {
 }
 
 
+_CMS_AXES = ("red", "green", "blue", "cyan", "magenta", "yellow")
+
+
+def is_command_table_complete(table: dict) -> bool:
+    """True when every required WB and CMS slot has a verified token.
+
+    Shared by the setup validator and the /api/setup/status endpoint so
+    "ready to calibrate" means the same thing everywhere.
+    """
+    # The shipped placeholder file carries a "_note" marker; its tokens fill
+    # every slot but are unverified guesses — treat as not probed.
+    if table.get("_note"):
+        return False
+    wb_ok = all(table.get("white_balance", {}).get(ch) for ch in ("R", "G", "B"))
+    cms_ok = all(
+        table.get("cms", {}).get(axis, {}).get(prop)
+        for axis in _CMS_AXES
+        for prop in ("HUE", "SAT", "LUM")
+    )
+    return wb_ok and cms_ok
+
+
 @dataclass
 class SlotResult:
     """Result for one required command slot."""

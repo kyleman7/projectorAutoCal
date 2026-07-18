@@ -523,6 +523,29 @@ async def confirm_device(ip: str, body: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Setup status (lightweight — no hardware access, no LLM)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/setup/status")
+async def setup_status() -> dict:
+    """Readiness facts the UI uses to guide the user through setup.
+
+    Cheap enough to call on every page load / tab switch: reads only
+    in-memory state and the platform's colorimeter availability.
+    """
+    from .probe import is_command_table_complete
+    try:
+        from . import colorimeter  # noqa: F401 — POSIX-only import probe
+        colorimeter_available = True
+    except ImportError:
+        colorimeter_available = False
+    return {
+        "command_table_complete": is_command_table_complete(_state.command_table),
+        "colorimeter_available": colorimeter_available,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Agent — setup validation
 # ---------------------------------------------------------------------------
 

@@ -85,7 +85,9 @@ brew install argyllcms
 sudo apt install argyll
 ```
 
-Set your Anthropic API key to enable AI features (optional — app runs fine without it):
+To enable the optional AI features, either set your Anthropic API key in the
+environment or paste it into the **AI Assistance** card at the bottom of the
+Setup tab (the app runs fine without it):
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
@@ -107,11 +109,14 @@ Open the printed URL in any browser on your network (e.g. `http://192.168.1.50:8
 
 ### 2. Connect devices
 
-In the **Setup** tab, enter your projector and Pi IPs — or click **Scan Network** to auto-discover them.
+The **Setup** tab walks you through the whole flow — a progress strip at the top
+tracks each step. Enter your projector and Pi IPs (or click **Scan Network** to
+auto-discover them), then click **Save & Test**. Saving is what makes the
+calibration run use these addresses.
 
 ### 3. Run the probe (first run only)
 
-Click **Run Probe** in the Setup tab. This queries the projector to discover which ESC/VP21 command tokens your specific firmware uses, and saves them to `configs/command_table.json`. You only need to do this once.
+Click **Run Probe** (Setup, step 2). This queries the projector to discover which ESC/VP21 command tokens your specific firmware uses, and saves them to `configs/command_table.json`. You only need to do this once — calibration can't adjust anything without it, and the Run tab will warn you if it hasn't been done.
 
 ### 4. Warm up the projector
 
@@ -167,7 +172,7 @@ No hardware needed for the test suite:
 pytest tests/ -v
 ```
 
-Tests cover config validation, color math (including CIE2000 ΔE against the Sharma et al. 2005 reference pairs), and patch target values for both SDR and HDR10.
+Tests cover config validation, color math (including CIE2000 ΔE against the Sharma et al. 2005 reference pairs), patch target values for both SDR and HDR10, and the closed-loop engine itself — convergence, relative-colorimetry normalization, correction direction, divergence recovery, and dry-run isolation, all against a simulated projector.
 
 ---
 
@@ -202,7 +207,8 @@ See [DESIGN.md](DESIGN.md) for full protocol specifications, algorithm details, 
 - **ESC/VP21** — proprietary Epson TCP protocol on port 3629; command tokens vary by firmware and must be probed
 - **Color targets** — SDR uses Rec.709 primaries under D65; HDR10 uses DCI P3 primaries under D65 (not DCI-native white). The 5040UB covers ~100% DCI-P3 but not Rec.2020
 - **Lab conversions** — always performed under D65 illuminant, not D50 (which is what ArgyllCMS uses internally)
-- **Correction algorithm** — proportional control with decaying step scale; no PID time-constant tuning required
+- **Relative colorimetry** — the colorimeter reports absolute cd/m²; the engine measures a reference white and rescales every reading to white = 100 before comparing against targets
+- **Correction algorithm** — proportional control with a clamped decaying step scale; a divergence guard reverts to the best-known settings if ΔE stops improving, so an unstable loop (or an inverted control axis) can't walk the projector away from target. No PID time-constant tuning required
 
 ---
 
