@@ -259,19 +259,59 @@ async def start_run(body: RunRequest) -> dict:
         raise HTTPException(409, detail="Calibration is already running")
 
     def _do_run() -> None:
-        proj_cfg = _state.config.projector
         pgen_cfg = _state.config.pgen
         cal_cfg = _state.config.calibration
+        dev_cfg = _state.config.device
         projector = display = col = None
 
         try:
-            projector = ProjectorClient.from_config(
-                proj_cfg, command_table=_state.command_table
-            )
-            projector.connect()
-            # Dry runs must not mutate projector state — skip the mode switch
-            if not body.dry_run:
-                _switch_picture_mode(projector, body.mode)
+            if dev_cfg.type == "samsung_ks8000_exlink":
+                from dataclasses import replace
+                from .samsung_exlink import (
+                    SamsungExLinkClient,
+                    exlink_wb_verified,
+                    load_exlink_table,
+                )
+
+                # The ExLink driver is WB-only / SDR-only until the CMS and HDR
+                # command bytes are verified on the actual TV.
+                if body.phase != "wb":
+                    raise RuntimeError(
+                        "The Samsung ExLink driver currently supports the White Balance "
+                        "phase only — set phase to 'wb'."
+                    )
+                if body.mode != "sdr":
+                    raise RuntimeError(
+                        "The Samsung ExLink driver supports SDR only (2016 SUHD sets "
+                        "expose calibration controls in SDR)."
+                    )
+                table = load_exlink_table()
+                if not body.dry_run and not exlink_wb_verified(table):
+                    raise RuntimeError(
+                        "ExLink white-balance commands are not yet verified on this TV — "
+                        "run scripts/exlink_spike.py first, or use Dry Run."
+                    )
+                baseline = table.get("baseline", {})
+                cal_cfg = replace(
+                    cal_cfg,
+                    wb_gain_range=list(baseline.get("wb_gain_range", [-50, 50])),
+                    wb_gain_center=int(baseline.get("wb_gain_center", 0)),
+                )
+                projector = SamsungExLinkClient(
+                    port=dev_cfg.exlink_port,
+                    baud=dev_cfg.exlink_baud,
+                    command_table=table,
+                )
+                projector.connect()
+            else:
+                proj_cfg = _state.config.projector
+                projector = ProjectorClient.from_config(
+                    proj_cfg, command_table=_state.command_table
+                )
+                projector.connect()
+                # Dry runs must not mutate projector state — skip the mode switch
+                if not body.dry_run:
+                    _switch_picture_mode(projector, body.mode)
 
             if body.dry_run:
                 display = NullPatchDisplay(patch_settle_ms=pgen_cfg.patch_settle_ms)
@@ -539,10 +579,19 @@ async def setup_status() -> dict:
         colorimeter_available = True
     except ImportError:
         colorimeter_available = False
-    return {
+
+    status = {
+        "device_type": _state.config.device.type,
         "command_table_complete": is_command_table_complete(_state.command_table),
         "colorimeter_available": colorimeter_available,
     }
+    if _state.config.device.type == "samsung_ks8000_exlink":
+        from .samsung_exlink import ExLinkError, exlink_wb_verified, load_exlink_table
+        try:
+            status["exlink_wb_verified"] = exlink_wb_verified(load_exlink_table())
+        except ExLinkError:
+            status["exlink_wb_verified"] = False
+    return status
 
 
 # ---------------------------------------------------------------------------

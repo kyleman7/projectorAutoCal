@@ -121,6 +121,27 @@ class CalibrationConfig:
 
 
 @dataclass
+class DeviceConfig:
+    """Which display device the calibration run drives.
+
+    "epson_5040ub" uses the ProjectorConfig transport (TCP/serial ESC/VP21).
+    "samsung_ks8000_exlink" drives the KS8000 over its 3.5mm ExLink serial
+    port (write-only; WB phase only until CMS commands are verified).
+    """
+    type: Literal["epson_5040ub", "samsung_ks8000_exlink"] = "epson_5040ub"
+    exlink_port: str = "/dev/ttyUSB1"
+    exlink_baud: int = 9600
+
+    def __post_init__(self) -> None:
+        if self.type not in ("epson_5040ub", "samsung_ks8000_exlink"):
+            raise ConfigError(
+                f"device.type must be 'epson_5040ub' or 'samsung_ks8000_exlink', got '{self.type}'"
+            )
+        if self.type == "samsung_ks8000_exlink" and not self.exlink_port:
+            raise ConfigError("device.exlink_port is required for the Samsung ExLink device")
+
+
+@dataclass
 class HdrConfig:
     picture_mode_command: str = "PMOD"
     hdr10_mode_value: str = "HDR4"
@@ -142,6 +163,7 @@ class Config:
     pgen: PGenConfig
     calibration: CalibrationConfig
     hdr: HdrConfig
+    device: DeviceConfig = field(default_factory=DeviceConfig)
     log_level: str = "INFO"
 
     def __post_init__(self) -> None:
@@ -258,12 +280,20 @@ def _build_config(data: dict) -> Config:
             mode_switch_settle_ms=int(hdr_raw.get("mode_switch_settle_ms", 3000)),
         )
 
+        dev_raw = data.get("device", {})
+        device = DeviceConfig(
+            type=dev_raw.get("type", "epson_5040ub"),
+            exlink_port=dev_raw.get("exlink_port", "/dev/ttyUSB1"),
+            exlink_baud=int(dev_raw.get("exlink_baud", 9600)),
+        )
+
         return Config(
             projector=proj,
             colorimeter=col,
             pgen=pgen,
             calibration=cal,
             hdr=hdr,
+            device=device,
             log_level=data.get("log_level", "INFO"),
         )
 
