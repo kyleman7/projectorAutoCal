@@ -66,6 +66,31 @@
         </p>
 
         <div class="field">
+          <label>Display Device</label>
+          <select id="device-type" onchange="onDeviceTypeChange()">
+            <option value="epson_5040ub">Epson 5040UB projector (ESC/VP21)</option>
+            <option value="samsung_ks8000_exlink">Samsung KS8000 TV (ExLink serial)</option>
+          </select>
+        </div>
+
+        <div id="exlink-fields" class="hidden">
+          <div class="field">
+            <label>ExLink Serial Port</label>
+            <input id="exlink-port" type="text" placeholder="COM5 or /dev/ttyUSB1">
+          </div>
+          <div class="text-dim mb-16" style="font-size:12px; line-height:1.7">
+            Connect a USB-serial adapter + DB9-to-3.5mm cable to the TV's <strong>ExLink</strong>
+            jack, and enable it in the service menu (TV off → Mute-1-8-2-Power →
+            Control → Sub Option → <em>EXT Link Support: ON</em>). Then verify the command
+            set once with <code>python scripts/exlink_spike.py --port &lt;port&gt;</code> —
+            the TV can't report its settings back, so before the first run also reset
+            Expert Settings → White Balance to defaults so the app starts from a known state.
+            Current support: <strong>SDR, White Balance phase only</strong>.
+          </div>
+        </div>
+
+        <div id="projector-conn-fields">
+        <div class="field">
           <label>Projector Connection</label>
           <div class="flex gap-8" style="margin-top:4px">
             <label style="cursor:pointer; display:flex; align-items:center; gap:6px">
@@ -115,6 +140,7 @@
             <code>/dev/cu.usbserial-XXXXXXXX</code>.
           </div>
         </div>
+        </div><!-- /projector-conn-fields -->
 
         <div class="field-row">
           <div class="field">

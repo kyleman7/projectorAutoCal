@@ -164,6 +164,39 @@ Key settings:
 
 ---
 
+## Samsung KS8000 support (experimental)
+
+The same closed loop can drive a **Samsung KS8000** (2016 SUHD) over its 3.5mm
+**ExLink** serial port — the port Calman AutoCal uses on these sets. Select
+*Samsung KS8000 TV (ExLink serial)* as the display device in the Setup tab.
+
+Current status and constraints:
+
+- **SDR + White Balance phase only** for now (2016 sets expose calibration
+  controls in SDR; CMS command bytes are not yet mapped).
+- **Hardware**: USB-serial adapter + DB9-to-3.5mm TRS cable into the ExLink
+  jack; enable ExLink in the service menu (TV off → Mute-1-8-2-Power →
+  Control → Sub Option → *EXT Link Support: ON*). If nothing responds, swap
+  RX/TX on the cable — the most common wiring problem.
+- **One-time command verification**: ExLink command bytes vary and are largely
+  undocumented, so the driver refuses anything unverified. Run
+  `python scripts/exlink_spike.py --port <port>` once — it sends candidate
+  commands one at a time, asks you to confirm the TV reacted, and records the
+  results in `configs/exlink_command_table.json`. The white-balance commands
+  must be discovered this way (`--try-cmd` sends ad-hoc frames).
+- **Write-only protocol**: the TV can't report its settings, so the driver
+  tracks a shadow state. Reset *Expert Settings → White Balance* to defaults
+  before the first run so the shadow state matches reality. The engine's
+  divergence guard reverts to best-known values if a command behaves
+  unexpectedly.
+- Optional network conveniences (power-on via Wake-on-LAN, closing OSD menus)
+  use the Tizen WebSocket remote API: `pip install "projector-cal[samsung]"`.
+
+The PGenerator patch source and colorimeter loop are unchanged — note that on
+an LCD panel the CCDIS3 uses the flush/contact mounting method, not the tripod.
+
+---
+
 ## Running Tests
 
 No hardware needed for the test suite:

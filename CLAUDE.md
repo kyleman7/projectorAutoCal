@@ -24,7 +24,10 @@ D:\projectorAutoCal\
 ├── .gitignore
 ├── configs/
 │   ├── default_config.json        ← all runtime defaults
-│   └── command_table.json         ← ESC/VP21 token map (populated by --probe)
+│   ├── command_table.json         ← ESC/VP21 token map (populated by --probe)
+│   └── exlink_command_table.json  ← Samsung ExLink commands (verified via scripts/exlink_spike.py)
+├── scripts/
+│   └── exlink_spike.py            ← interactive ExLink command discovery (manual-confirm)
 ├── profiles/                      ← saved calibration profiles (JSON, gitignored)
 ├── discovery/                     ← last_scan.json cache (gitignored)
 ├── static/
@@ -38,6 +41,8 @@ D:\projectorAutoCal\
 │   ├── config.py                  ← dataclasses, load_config(), ConfigError
 │   ├── color_math.py              ← XYZ↔Lab, ΔE2000, SDR/HDR10 targets
 │   ├── projector.py               ← ESC/VP21 TCP driver
+│   ├── samsung_exlink.py          ← Samsung KS8000 ExLink serial driver (WB-only, shadow state)
+│   ├── samsung_ws.py              ← Samsung Tizen WS conveniences (WoL, key presses)
 │   ├── probe.py                   ← command token auto-discovery
 │   ├── colorimeter.py             ← ArgyllCMS spotread subprocess (POSIX only)
 │   ├── pgen.py                    ← PGenerator TCP adapter + NullPatchDisplay
@@ -230,6 +235,14 @@ Phase 3 — Verification:
 Convergence threshold: ΔE < 1.0 (configurable, default 1.0)
 Max iterations per patch: 20 (configurable)
 
+### Samsung KS8000 (ExLink serial) — experimental second device
+
+- Selected via `device.type = "samsung_ks8000_exlink"` in config; driver in `samsung_exlink.py`, network conveniences (WoL, key presses via samsungtvws) in `samsung_ws.py`.
+- ExLink wire format: 9600 8N1, 7-byte frames `08 22 c1 c2 c3 value checksum` (checksum = two's complement of the byte sum; frame sums to 0 mod 256). Enabled via TV service menu (Mute-1-8-2-Power → Control → Sub Option → EXT Link Support ON).
+- **Write-only**: no readback. The driver keeps a shadow state seeded from `configs/exlink_command_table.json` `baseline` — the user must reset the TV's WB controls to that baseline before the first run.
+- **Verified-command gating**: the driver refuses to send any command whose table entry isn't `verified: true`. Discovery is manual-confirm only via `scripts/exlink_spike.py` (never auto-sweep unknown bytes — service protocols can reach dangerous settings). WB command bytes are unknown publicly and must be discovered on the actual TV (Calman AutoCal proves they exist for 2016 SUHD).
+- **Scope**: SDR + WB phase only; server.py rejects other phases/modes for this device. Samsung WB range is [-50, 50] center 0 (from the table baseline; server overrides CalibrationConfig per run). CMS on this panel is "Color Space Custom" (per-primary R/G/B coords, not HUE/SAT/LUM) — deferred; needs its own `compute_corrections` for `engine._correction_loop`.
+
 ### 5040UB HDR Specifics
 
 - HDR10 only (no HLG, no Dolby Vision)
@@ -348,6 +361,10 @@ Results cached to `discovery/last_scan.json` (gitignored).
 
 ```json
 {
+  "device": {
+    "type": "epson_5040ub | samsung_ks8000_exlink",
+    "exlink_port": "/dev/ttyUSB1", "exlink_baud": 9600
+  },
   "projector": {
     "host": "192.168.1.100", "port": 3629,
     "connection_timeout": 5.0, "command_timeout": 2.0, "command_settle_ms": 200

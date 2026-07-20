@@ -1,0 +1,27 @@
+{
+  "_note": "Samsung KS8000 ExLink command table. NOTHING here is verified until scripts/exlink_spike.py confirms it on the actual TV — the driver refuses to send entries with verified:false during calibration. Frame = 08 22 c1 c2 c3 value checksum. 'cmd' is [c1,c2,c3]; 'wire_offset' is added to the logical value before sending (e.g. if the TV encodes -50..+50 as 0..100, wire_offset is 50 — the spike determines this).",
+  "commands": {
+    "power_on":    { "cmd": [0, 0, 0],  "fixed_value": 2,    "verified": false, "source": "Samsung Consumer RS232 Control guide (public)" },
+    "power_off":   { "cmd": [0, 0, 0],  "fixed_value": 1,    "verified": false, "source": "Samsung Consumer RS232 Control guide (public)" },
+    "volume_set":  { "cmd": [1, 0, 0],  "wire_offset": 0,    "verified": false, "source": "Samsung Consumer RS232 Control guide (public)" },
+    "mute_toggle": { "cmd": [2, 0, 0],  "fixed_value": 0,    "verified": false, "source": "Samsung Consumer RS232 Control guide (public)" },
+
+    "picture_mode": { "cmd": [11, 0, 0], "wire_offset": 0,   "verified": false, "source": "community integration drivers (unconfirmed)" },
+    "backlight":    { "cmd": [11, 1, 0], "wire_offset": 0,   "verified": false, "source": "community integration drivers (unconfirmed)" },
+    "contrast":     { "cmd": [11, 2, 0], "wire_offset": 0,   "verified": false, "source": "community integration drivers (unconfirmed)" },
+    "brightness":   { "cmd": [11, 3, 0], "wire_offset": 0,   "verified": false, "source": "community integration drivers (unconfirmed)" },
+
+    "wb_gain_r": { "cmd": null, "wire_offset": 0, "verified": false, "source": "UNKNOWN — discover via spike (Calman AutoCal proves the port supports it on 2016 SUHD)" },
+    "wb_gain_g": { "cmd": null, "wire_offset": 0, "verified": false, "source": "UNKNOWN — discover via spike" },
+    "wb_gain_b": { "cmd": null, "wire_offset": 0, "verified": false, "source": "UNKNOWN — discover via spike" },
+    "wb_offset_r": { "cmd": null, "wire_offset": 0, "verified": false, "source": "UNKNOWN — discover via spike" },
+    "wb_offset_g": { "cmd": null, "wire_offset": 0, "verified": false, "source": "UNKNOWN — discover via spike" },
+    "wb_offset_b": { "cmd": null, "wire_offset": 0, "verified": false, "source": "UNKNOWN — discover via spike" }
+  },
+  "baseline": {
+    "_note": "Shadow-state seed. Before the first calibration run, reset the TV's Expert Settings > White Balance to defaults (all zeros) so the shadow state matches reality.",
+    "wb_gains": { "R": 0, "G": 0, "B": 0 },
+    "wb_gain_range": [-50, 50],
+    "wb_gain_center": 0
+  }
+}

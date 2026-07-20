@@ -21,6 +21,10 @@ dependencies = [
 serial = [
     "pyserial>=3.5",
 ]
+samsung = [
+    "pyserial>=3.5",
+    "samsungtvws>=2.6",
+]
 dev = [
     "pytest>=7.4.0",
     "pytest-mock>=3.11.0",

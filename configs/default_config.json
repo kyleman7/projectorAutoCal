@@ -1,4 +1,9 @@
 {
+  "device": {
+    "type": "epson_5040ub",
+    "exlink_port": "/dev/ttyUSB1",
+    "exlink_baud": 9600
+  },
   "projector": {
     "transport": "tcp",
     "host": "192.168.1.100",

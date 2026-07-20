@@ -22,11 +22,12 @@ const state = {
 // and the Run tab readiness banner.
 const setupState = {
   connections: false,          // Save & Test passed for projector + PGenerator
-  probe: false,                // command table complete (probed or preloaded)
+  probe: false,                // command set verified (ESC/VP21 probe or ExLink spike)
   placement: false,            // placement checklist confirmed
   validated: false,            // pre-flight validation returned ready
   calibrated: false,           // at least one run completed this session
   colorimeterAvailable: null,  // null = unknown, false = POSIX-only host problem
+  deviceType: 'epson_5040ub',  // from /api/setup/status
 };
 
 const PATCH_COLORS = {
@@ -78,7 +79,10 @@ async function refreshSetupStatus() {
   try {
     const res = await fetch('/api/setup/status');
     const data = await res.json();
-    setupState.probe = !!data.command_table_complete;
+    setupState.deviceType = data.device_type || 'epson_5040ub';
+    setupState.probe = setupState.deviceType === 'samsung_ks8000_exlink'
+      ? !!data.exlink_wb_verified
+      : !!data.command_table_complete;
     setupState.colorimeterAvailable = !!data.colorimeter_available;
   } catch { /* leave last-known state */ }
   updateSetupProgress();
@@ -87,8 +91,16 @@ async function refreshSetupStatus() {
 function renderRunReadiness() {
   const el = document.getElementById('run-readiness');
   if (!el) return;
+  const samsung = setupState.deviceType === 'samsung_ks8000_exlink';
   const warnings = [];
-  if (!setupState.probe) {
+  if (samsung) {
+    warnings.push('Samsung KS8000 (ExLink): supports <strong>SDR</strong> + the ' +
+                  '<strong>White Balance</strong> phase only — set Mode to SDR and Phase to White Balance.');
+    if (!setupState.probe) {
+      warnings.push('ExLink WB commands are not yet verified on your TV — run ' +
+                    '<code>scripts/exlink_spike.py</code> first; until then only <strong>Dry Run</strong> is allowed.');
+    }
+  } else if (!setupState.probe) {
     warnings.push('The command table is incomplete — run the <strong>Probe</strong> ' +
                   '(Setup, step 2) first. Corrections can’t be sent without it.');
   }
@@ -104,6 +116,12 @@ function renderRunReadiness() {
     el.className = 'banner banner-ok';
     el.innerHTML = '✓ Setup looks good. Pick a mode and press Start — or tick Dry Run to rehearse safely.';
   }
+}
+
+function onDeviceTypeChange() {
+  const samsung = document.getElementById('device-type').value === 'samsung_ks8000_exlink';
+  document.getElementById('exlink-fields').classList.toggle('hidden', !samsung);
+  document.getElementById('projector-conn-fields').classList.toggle('hidden', samsung);
 }
 
 function onPlacementConfirm(checked) {
@@ -130,6 +148,11 @@ async function loadConfigIntoFields() {
       document.querySelector('input[name="proj-transport"][value="serial"]').checked = true;
       setTransport('serial');
     }
+    if (cfg.device) {
+      document.getElementById('device-type').value = cfg.device.type;
+      document.getElementById('exlink-port').value = cfg.device.exlink_port || '';
+      onDeviceTypeChange();
+    }
   } catch { /* keep placeholders */ }
 }
 
@@ -146,6 +169,10 @@ async function saveConfigFromFields() {
       },
       pgen: { host: v('pgen-ip'), port: parseInt(v('pgen-port')) || 85 },
       colorimeter: { spotread_path: v('spotread-path') || 'spotread' },
+      device: {
+        type: v('device-type'),
+        exlink_port: v('exlink-port') || '/dev/ttyUSB1',
+      },
     },
   };
   try {
@@ -333,8 +360,11 @@ async function testConnections() {
   if (!saved) return;
 
   const transport = getTransport();
+  const samsung = v('device-type') === 'samsung_ks8000_exlink';
   const checks = [
-    {
+    // The ExLink serial link isn't testable over the network — the spike
+    // script verifies it. Only test the projector for the Epson device.
+    ...(samsung ? [] : [{
       label: transport === 'serial'
         ? `Projector (serial: ${v('serial-port-select')})`
         : `Projector (TCP: ${v('proj-ip')}:${v('proj-port')})`,
@@ -342,7 +372,7 @@ async function testConnections() {
       transport,
       ip: v('proj-ip'), port: v('proj-port'),
       serial_port: v('serial-port-select'), serial_baud: v('serial-baud'),
-    },
+    }]),
     { label: 'PGenerator', type: 'pgen', transport: 'tcp', ip: v('pgen-ip'), port: v('pgen-port') },
   ];
 
@@ -379,6 +409,12 @@ async function testConnections() {
       allOk = false;
       li.querySelector('.check-icon').textContent = '❌';
     }
+  }
+  if (samsung) {
+    const li = document.createElement('li');
+    li.innerHTML = `<span class="check-icon">ℹ️</span><div>Samsung ExLink (${v('exlink-port')})` +
+      `<div class="check-note">Serial link — verify once with <code>scripts/exlink_spike.py</code>; not testable from here.</div></div>`;
+    ul.appendChild(li);
   }
   setupState.connections = allOk;
   updateSetupProgress();
