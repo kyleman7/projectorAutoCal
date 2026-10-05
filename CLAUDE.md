@@ -150,13 +150,21 @@ os.close(slave_fd)  # parent only needs master
 
 ### PGenerator Wire Protocol
 
-Simple 3-byte TCP packet per patch: `[R, G, B]` (0–255 each).
+Text commands on TCP port 85, each terminated by `b"\x02\r"`; every command gets
+a reply with the same terminator (the protocol quietvoid/pgen_client speaks):
 
-```python
-sock.sendall(bytes([r, g, b]))
-```
+| Command | Reply |
+|---------|-------|
+| `IS_ALIVE` | `ALIVE` |
+| `CMD:GET_MODE` | `OK:0[3840x2160 30.00Hz ...]` |
+| `CMD:GET_PGENERATOR_CONF_RGB_QUANT_RANGE` | `OK:1` (1 = limited 16–235, 2 = full) |
+| `RGB=RECTANGLE;w,h;0;r,g,b;bg_r,bg_b,bg_g;0,0,x,y;-1` | `OK` (8-bit; background is r,b,g) |
+| `QUIT` | — |
 
-No acknowledgment — connection staying open = success. Reconnect once on broken-pipe.
+`PGenClient.connect()` checks `IS_ALIVE`, reads the resolution and RGB range, and
+every patch is sent full-screen. Patch values are full-range 8-bit and are scaled
+to 16–235 when the Pi outputs limited range (`16 + round(v × 219 / 255)`), so white
+is always peak white. Reconnect once on a dropped connection.
 
 ### Color Science
 
@@ -349,7 +357,7 @@ Two strategies, run concurrently:
 2. **Port scan**: connects to all /24 subnet hosts on ports 3629 (projector) and 85 (pgen) using `ThreadPoolExecutor(max_workers=50)`, 0.5s connect timeout
 
 Projector verification: full ESC/VP.net handshake (send magic bytes, read 16-byte ACK).
-PGenerator verification: successful TCP connection (no challenge/response protocol).
+PGenerator verification: `IS_ALIVE` → `ALIVE` handshake (via `PGenClient.connect()`).
 
 Results cached to `discovery/last_scan.json` (gitignored).
 
@@ -408,7 +416,7 @@ Results cached to `discovery/last_scan.json` (gitignored).
 
 5. **colorimeter.py is POSIX-only**: `import colorimeter` raises `ImportError` on Windows. `server.py` catches this and falls back to a dummy measure function for dry-run testing.
 
-6. **PGenerator has no ACK**: After sending 3 bytes, there is no response. An open TCP connection and no `OSError` = success.
+6. **PGenerator speaks a text protocol, not raw bytes**: the old 3-byte `[R,G,B]` packet was silently ignored by the Pi — no patch ever appeared. Use `RGB=RECTANGLE;…` + `\x02\r`, and respect the Pi's RGB quant range (limited = 16–235).
 
 7. **command_table.json must be probed first**: The default file has Epson's documented tokens, unverified against the user's projector. Run `/api/probe` (or `projector-cal --probe` if CLI mode added) before first calibration. The placeholder file carries a `"_note"` key which `load_command_table` deliberately preserves — `probe.is_command_table_complete()` treats its presence as "not probed yet" (the probe writes the table without it). Do not strip `_note` on load.
 

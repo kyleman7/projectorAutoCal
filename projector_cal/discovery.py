@@ -324,13 +324,17 @@ class NetworkDiscovery:
 
     @staticmethod
     def _verify_pgen(ip: str, port: int) -> tuple[bool, str | None]:
-        """Try opening a connection to PGenerator; return (confirmed, hostname).
+        """Ask the host IS_ALIVE over PGenerator's text protocol; return (confirmed, hostname).
 
-        PGenerator doesn't have a challenge/response handshake — an open port
-        that accepts a connection is considered confirmed enough.
+        Sent directly rather than via PGenClient, whose disconnect blanks the
+        screen — discovery must not change what the Pi is displaying.
         """
         try:
-            with socket.create_connection((ip, port), timeout=_VERIFY_TIMEOUT):
+            with socket.create_connection((ip, port), timeout=_VERIFY_TIMEOUT) as sock:
+                sock.settimeout(_VERIFY_TIMEOUT)
+                sock.sendall(b"IS_ALIVE\x02\r")
+                if not sock.recv(64).startswith(b"ALIVE"):
+                    return False, None
                 try:
                     hostname = socket.getfqdn(ip)
                 except OSError:

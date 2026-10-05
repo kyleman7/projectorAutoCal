@@ -1,15 +1,19 @@
 """PGenerator TCP patch display adapter.
 
-PGenerator (quietvoid/pgen_client) is a Raspberry Pi service that displays full-screen
-color patches via HDMI. The projector's HDMI input shows the patch; the colorimeter
-measures the projected result.
+PGenerator is a Raspberry Pi service that displays full-screen color patches via
+HDMI. The projector's HDMI input shows the patch; the colorimeter measures the
+projected result.
 
-Wire protocol: pgen_client uses a simple binary TCP protocol. Each packet is 3 bytes:
-  byte 0: R (0–255)
-  byte 1: G (0–255)
-  byte 2: B (0–255)
+Wire protocol (TCP port 85, as spoken by quietvoid/pgen_client): text commands,
+each terminated by b"\\x02\\r"; every command gets a reply with the same terminator.
+  IS_ALIVE                         → "ALIVE"
+  CMD:GET_MODE                     → "OK:0[3840x2160 30.00Hz ...]"
+  CMD:GET_PGENERATOR_CONF_RGB_QUANT_RANGE → "OK:1" (1 = limited 16–235, 2 = full)
+  RGB=RECTANGLE;w,h;0;r,g,b;bg_r,bg_b,bg_g;0,0,x,y;-1   (8-bit; note the bg order)
+  QUIT
 
-If a future fork exposes an HTTP API, swap the adapter by subclassing PatchDisplay.
+Patches are given in full-range 8-bit (0–255) and scaled to 16–235 when the Pi
+outputs limited range, so "white" is always peak white. They fill the screen.
 
 Connection is established at context entry and kept open for the session. A single
 reconnect is attempted on broken-pipe before raising PGenError.
@@ -21,9 +25,12 @@ import logging
 import socket
 import time
 from dataclasses import dataclass
+import re
 from typing import Protocol, runtime_checkable
 
 logger = logging.getLogger(__name__)
+
+_CMD_END = b"\x02\r"
 
 
 class PGenError(Exception):
@@ -41,9 +48,6 @@ class RGBPatch:
         for name, val in (("r", self.r), ("g", self.g), ("b", self.b)):
             if not (0 <= val <= 255):
                 raise ValueError(f"RGBPatch.{name} must be 0–255, got {val}")
-
-    def as_bytes(self) -> bytes:
-        return bytes([self.r, self.g, self.b])
 
 
 @runtime_checkable
@@ -85,47 +89,61 @@ class PGenClient:
         port: int = 85,
         patch_settle_ms: int = 500,
         connection_timeout: float = 5.0,
+        command_timeout: float = 10.0,
     ) -> None:
         self.host = host
         self.port = port
         self.patch_settle_ms = patch_settle_ms
         self.connection_timeout = connection_timeout
+        self.command_timeout = command_timeout
         self._sock: socket.socket | None = None
+        self._size: tuple[int, int] = (1920, 1080)
+        self._limited_range = False
 
     # ------------------------------------------------------------------
     # Connection lifecycle
     # ------------------------------------------------------------------
 
     def connect(self) -> None:
-        """Open TCP connection to PGenerator."""
+        """Open TCP connection, confirm it is PGenerator, read its output mode."""
         if self._sock is not None:
             return
         try:
             sock = socket.create_connection(
                 (self.host, self.port), timeout=self.connection_timeout
             )
-            sock.settimeout(5.0)
-            self._sock = sock
-            logger.debug("Connected to PGenerator at %s:%d", self.host, self.port)
         except OSError as e:
             raise PGenError(
                 f"Cannot connect to PGenerator at {self.host}:{self.port}: {e}"
             ) from e
+        sock.settimeout(self.command_timeout)
+        self._sock = sock
+        try:
+            alive = self._command("IS_ALIVE")
+            if alive != "ALIVE":
+                raise PGenError(f"{self.host}:{self.port} is not PGenerator (IS_ALIVE → {alive!r})")
+            mode = self._query("GET_MODE")
+            m = re.search(r"(\d+)x(\d+)", mode)
+            if m:
+                self._size = (int(m.group(1)), int(m.group(2)))
+            else:
+                logger.warning("Unrecognized PGenerator mode %r — assuming %dx%d", mode, *self._size)
+            self._limited_range = self._query("GET_PGENERATOR_CONF_RGB_QUANT_RANGE") == "1"
+        except Exception:
+            self._close()
+            raise
+        logger.info("Connected to PGenerator at %s:%d (%dx%d, %s range)", self.host, self.port,
+                    *self._size, "limited" if self._limited_range else "full")
 
     def disconnect(self) -> None:
-        """Close the TCP connection after blanking the screen."""
+        """Blank the screen and close the TCP connection."""
         try:
             if self._sock is not None:
                 self._send_patch(RGBPatch(0, 0, 0))
+                self._sock.sendall(b"QUIT" + _CMD_END)
         except Exception:
             pass
-        if self._sock is not None:
-            try:
-                self._sock.close()
-            except OSError:
-                pass
-            self._sock = None
-            logger.debug("Disconnected from PGenerator")
+        self._close()
 
     def __enter__(self) -> "PGenClient":
         self.connect()
@@ -163,19 +181,56 @@ class PGenClient:
     # Internal
     # ------------------------------------------------------------------
 
-    def _send_patch(self, patch: RGBPatch) -> None:
-        """Send 3-byte RGB packet; reconnect once on broken pipe."""
+    def _close(self) -> None:
+        if self._sock is not None:
+            try:
+                self._sock.close()
+            except OSError:
+                pass
+            self._sock = None
+
+    def _command(self, cmd: str) -> str:
+        """Send one command and return its reply without the terminator."""
         if self._sock is None:
             raise PGenError("Not connected — call connect() first")
-        data = patch.as_bytes()
+        try:
+            self._sock.sendall(cmd.encode("ascii") + _CMD_END)
+            buf = b""
+            while not buf.endswith(_CMD_END):
+                chunk = self._sock.recv(8192)
+                if not chunk:
+                    raise PGenError(f"PGenerator closed the connection after {cmd!r}")
+                buf += chunk
+        except socket.timeout as e:
+            raise PGenError(f"PGenerator did not answer {cmd!r}") from e
+        return buf[: -len(_CMD_END)].decode("ascii", errors="replace")
+
+    def _query(self, name: str) -> str:
+        """Send CMD:<name> and return the value after "OK:"."""
+        reply = self._command(f"CMD:{name}")
+        if not reply.startswith("OK:"):
+            raise PGenError(f"PGenerator rejected CMD:{name}: {reply!r}")
+        return reply[3:]
+
+    def _code(self, v: int) -> int:
+        """Map a full-range 8-bit value to the Pi's output range."""
+        return 16 + round(v * 219 / 255) if self._limited_range else v
+
+    def _send_patch(self, patch: RGBPatch) -> None:
+        """Send a full-screen rectangle; reconnect once on a dropped connection."""
+        r, g, b = self._code(patch.r), self._code(patch.g), self._code(patch.b)
+        w, h = self._size
+        # Background matches the patch so any sizing mismatch is still full-field;
+        # PGenerator takes the background as r,b,g.
+        cmd = f"RGB=RECTANGLE;{w},{h};0;{r},{g},{b};{r},{b},{g};0,0,0,0;-1"
         for attempt in range(2):
             try:
-                self._sock.sendall(data)
+                self._command(cmd)
                 return
-            except (BrokenPipeError, ConnectionResetError, OSError) as e:
-                if attempt == 0:
+            except (PGenError, OSError) as e:
+                if attempt == 0 and self._sock is not None:
                     logger.warning("PGenerator connection lost (%s); reconnecting…", e)
-                    self._sock = None
+                    self._close()
                     self.connect()
                 else:
                     raise PGenError(f"PGenerator send failed after reconnect: {e}") from e

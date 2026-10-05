@@ -365,15 +365,22 @@ below 0.5%, the warm-up badge turns green and "Validate Setup" becomes active.
 
 ## PGenerator Protocol
 
-PGenerator (`quietvoid/pgen_client`) listens for 3-byte TCP packets on port 85:
+Text commands on TCP port 85, each terminated by `b"\x02\r"`; every command gets
+a reply with the same terminator (the protocol quietvoid/pgen_client speaks):
 
-```
-byte 0: R (0-255)
-byte 1: G (0-255)
-byte 2: B (0-255)
-```
+| Command | Reply |
+|---------|-------|
+| `IS_ALIVE` | `ALIVE` |
+| `CMD:GET_MODE` | `OK:0[3840x2160 30.00Hz ...]` |
+| `CMD:GET_PGENERATOR_CONF_RGB_QUANT_RANGE` | `OK:1` (1 = limited 16–235, 2 = full) |
+| `RGB=RECTANGLE;w,h;0;r,g,b;bg_r,bg_b,bg_g;0,0,x,y;-1` | `OK` (8-bit; background is r,b,g) |
+| `QUIT` | — |
 
-No acknowledgment. The patch displays immediately on HDMI output.
+`PGenClient.connect()` checks `IS_ALIVE`, reads the resolution and RGB range, and
+every patch is sent full-screen. Patch values are full-range 8-bit and are scaled
+to 16–235 when the Pi outputs limited range (`16 + round(v × 219 / 255)`), so white
+is always peak white. Reconnect once on a dropped connection.
+
 After sending, sleep `patch_settle_ms` (default 500ms) before measuring.
 
 The `PatchDisplay` Protocol (abstract interface) allows swapping in:
