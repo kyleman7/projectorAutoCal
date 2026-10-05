@@ -26,7 +26,7 @@ from pydantic import BaseModel
 from .config import ConfigError, load_command_table, load_config, load_config_from_dict
 from .discovery import NetworkDiscovery
 from .engine import CalibrationEngine, CalibrationReport
-from .pgen import NullPatchDisplay, PGenClient, RGBPatch
+from .pgen import NullPatchDisplay, PGenClient, PGenError, RGBPatch
 from .profiles import (
     CalibrationProfile,
     apply_profile,
@@ -240,7 +240,7 @@ def _switch_picture_mode(projector: ProjectorClient, mode: str) -> None:
     except ProjectorError as e:
         logger.warning("Picture mode switch failed: %s — continuing with current mode", e)
         _state.broadcast_event({
-            "event": "error",
+            "event": "warning",
             "message": f"Picture mode switch to '{mode}' failed ({e}); "
                        "continuing with the projector's current mode.",
         })
@@ -273,14 +273,24 @@ async def start_run(body: RunRequest) -> dict:
             if not body.dry_run:
                 _switch_picture_mode(projector, body.mode)
 
+            # Dry runs still show patches — "dry" only means no projector
+            # writes, and readings of a blank screen are meaningless. Fall back
+            # to the null display only when the Pi is unreachable.
+            display = PGenClient(
+                host=pgen_cfg.host,
+                port=pgen_cfg.port,
+                patch_settle_ms=pgen_cfg.patch_settle_ms,
+            )
             if body.dry_run:
-                display = NullPatchDisplay(patch_settle_ms=pgen_cfg.patch_settle_ms)
-            else:
-                display = PGenClient(
-                    host=pgen_cfg.host,
-                    port=pgen_cfg.port,
-                    patch_settle_ms=pgen_cfg.patch_settle_ms,
-                )
+                try:
+                    display.connect()
+                except PGenError as e:
+                    logger.warning("Dry run without patches: %s", e)
+                    _state.broadcast_event({
+                        "event": "warning",
+                        "message": f"{e} — dry run continues without showing patches.",
+                    })
+                    display = NullPatchDisplay(patch_settle_ms=pgen_cfg.patch_settle_ms)
 
             # Colorimeter is POSIX-only. A dummy measure function is acceptable
             # for dry runs, but a real run driven by random readings would walk

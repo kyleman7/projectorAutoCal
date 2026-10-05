@@ -276,6 +276,7 @@ All engine events are broadcast as JSON objects. Key events:
 {"event": "phase_done",     "phase": "wb"}
 {"event": "run_complete",   "report": {...}}
 {"event": "error",          "message": "..."}
+{"event": "warning",        "message": "..."}   // non-fatal; the run continues
 {"event": "probe_progress", "message": "WB.R: found 'WBALGAINR' = 128"}
 {"event": "probe_done",     "missing": [], "summary": [...]}
 {"event": "discovery_start","method": "mdns+port_scan", "subnet": "192.168.1.0/24"}
@@ -427,7 +428,7 @@ Results cached to `discovery/last_scan.json` (gitignored).
 
 15. **Secondary targets are derived, not hardcoded**: cyan/magenta/yellow xyY are computed at import time by summing the XYZ of their constituent primaries (`color_math._build_targets`). Hardcoded HDR10 secondaries were several ΔE off. Grey targets use display gamma 2.2.
 
-16. **Dummy measurements are dry-run only**: `server.py` refuses a real (non-dry) run when the colorimeter module is unavailable. Driving corrections from random readings would walk the projector's settings randomly.
+16. **Dry run = no projector writes, but patches still display**: a dry run drives PGenerator (falling back to NullPatchDisplay with a `warning` only if the Pi is unreachable) so readings mean something. **Dummy measurements are dry-run only**: `server.py` refuses a real (non-dry) run when the colorimeter module is unavailable. Driving corrections from random readings would walk the projector's settings randomly.
 
 17. **CMS is not automatable on the 5040UB**: there are no RGBCMY commands over ESC/VP21 (checked against Epson's list and ~900 undocumented guesses). Phase 2 is guided manual adjustment; profiles store `cms_values: {}`, and `apply_profile` only logs old CMS values. Don't reintroduce `get_cms`/`set_cms`.
 

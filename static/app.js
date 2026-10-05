@@ -253,6 +253,11 @@ function handleEvent(ev) {
       finishRun();
       break;
 
+    case 'warning':
+      // Non-fatal: the run continues, so leave the Start/Stop state alone
+      logLine(`WARNING: ${ev.message}`, 'log-error');
+      break;
+
     case 'probe_progress':
       appendProbeLog(ev.message);
       break;
