@@ -46,6 +46,17 @@ _AI_SETTINGS_PATH = Path(__file__).parent.parent / "configs" / "ai_settings.json
 
 app = FastAPI(title="ProjectorCal", version="0.1.0")
 
+
+@app.middleware("http")
+async def _revalidate_ui_files(request, call_next):
+    """Make browsers revalidate the SPA files on every load. Without this they
+    may keep running a cached app.js after a server update, silently ignoring
+    events the old script doesn't know (e.g. cms_guidance)."""
+    response = await call_next(request)
+    if not request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
 # ---------------------------------------------------------------------------
 # Shared server state
 # ---------------------------------------------------------------------------
@@ -61,6 +72,9 @@ class _ServerState:
         self._event_queue: asyncio.Queue = asyncio.Queue()
         self._loop: asyncio.AbstractEventLoop | None = None
         # AI agent settings — loaded from configs/ai_settings.json
+        # Last unanswered cms_guidance prompt — replayed to clients that
+        # connect (or reload) while the engine is waiting on the user
+        self.pending_cms_guidance: dict | None = None
         self.ai_enabled: bool = False
         self._ai_api_key: str = ""  # never exposed via API; only stored in memory + file
 
@@ -69,6 +83,11 @@ class _ServerState:
 
     def broadcast_event(self, event: dict) -> None:
         """Thread-safe: put event into async queue from any thread."""
+        kind = event.get("event")
+        if kind == "cms_guidance":
+            self.pending_cms_guidance = event
+        elif kind in ("patch_done", "run_complete", "error"):
+            self.pending_cms_guidance = None
         if self._loop is not None and not self._loop.is_closed():
             self._loop.call_soon_threadsafe(self._event_queue.put_nowait, event)
 
@@ -144,6 +163,8 @@ async def websocket_endpoint(ws: WebSocket) -> None:
     await ws.accept()
     _state._ws_clients.add(ws)
     logger.info("WebSocket client connected (%d total)", len(_state._ws_clients))
+    if _state.pending_cms_guidance is not None:
+        await ws.send_text(json.dumps(_state.pending_cms_guidance))
     try:
         while True:
             await ws.receive_text()  # keep alive; client messages ignored
