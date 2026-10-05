@@ -1,7 +1,7 @@
 """ArgyllCMS spotread subprocess driver for the X-Rite ColorChecker Display Pro (CCDIS3).
 
 Design:
-- Spawns `spotread -e -d {display_index}` with ARGYLL_NOT_INTERACTIVE=1 in the environment.
+- Spawns `spotread -e -c {display_index}` with ARGYLL_NOT_INTERACTIVE=1 in the environment.
 - Uses os.openpty() to give spotread a pseudo-TTY controlling terminal so it doesn't
   stall waiting for user input.
 - Triggers each measurement by writing b"\\n" to the pty master fd.
@@ -100,7 +100,9 @@ class Colorimeter:
         cmd = [
             self.spotread_path,
             "-e",               # emissive mode (projector screen)
-            "-d", str(self.display_index),
+            # -c picks the instrument; -d would mean "display density" and the
+            # number would become a log-file name in the working directory
+            "-c", str(self.display_index),
         ]
 
         logger.info("Starting spotread: %s", " ".join(cmd))

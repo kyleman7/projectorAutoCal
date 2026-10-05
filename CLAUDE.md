@@ -135,7 +135,7 @@ def preexec():
     fcntl.ioctl(slave_fd, termios.TIOCSCTTY, 0)
 
 proc = subprocess.Popen(
-    ["spotread", "-e", "-d", str(display_index)],
+    ["spotread", "-e", "-c", str(display_index)],  # -c = instrument; -d is "density"
     stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
     env={**os.environ, "ARGYLL_NOT_INTERACTIVE": "1"},
     preexec_fn=preexec, close_fds=True,
