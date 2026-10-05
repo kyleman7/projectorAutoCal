@@ -148,13 +148,11 @@ def apply_profile(profile: CalibrationProfile, projector: ProjectorClient) -> No
             projector.set_wb_gain(ch, value)
             logger.debug("Applied WB.%s = %d", ch, value)
 
-    # CMS values
-    for axis, props in profile.cms_values.items():
-        for prop in ("HUE", "SAT", "LUM"):
-            value = props.get(prop)
-            if value is not None:
-                projector.set_cms(axis, prop, value)
-                logger.debug("Applied CMS.%s.%s = %d", axis, prop, value)
+    # The 5040UB has no CMS commands over ESC/VP21 — RGBCMY values in older
+    # profiles can only be re-entered by hand from the projector menu.
+    if any(profile.cms_values.values()):
+        logger.warning("Profile '%s' has CMS values; set them manually in the projector's "
+                       "RGBCMY menu: %s", profile.name, profile.cms_values)
 
     logger.info("Profile '%s' applied successfully.", profile.name)
 
@@ -166,7 +164,9 @@ def profile_from_projector(
     final_delta_e: dict[str, float] | None = None,
     screen_info: dict | None = None,
 ) -> CalibrationProfile:
-    """Read the current WB gains and CMS values from the projector and build a profile.
+    """Read the current WB gains from the projector and build a profile.
+
+    CMS (RGBCMY) values cannot be read over ESC/VP21, so cms_values is empty.
 
     Args:
         name: Human-readable profile name.
@@ -184,21 +184,12 @@ def profile_from_projector(
         "B": projector.get_wb_gain("B"),
     }
 
-    cms_axes = ["red", "green", "blue", "cyan", "magenta", "yellow"]
-    cms_values: dict[str, dict] = {}
-    for axis in cms_axes:
-        cms_values[axis] = {
-            "HUE": projector.get_cms(axis, "HUE"),
-            "SAT": projector.get_cms(axis, "SAT"),
-            "LUM": projector.get_cms(axis, "LUM"),
-        }
-
     return CalibrationProfile(
         name=name,
         mode=mode,
         created_at=datetime.now(timezone.utc).isoformat(),
         wb_gains=wb_gains,
-        cms_values=cms_values,
+        cms_values={},
         final_delta_e=final_delta_e or {},
         screen_info=screen_info or {},
     )

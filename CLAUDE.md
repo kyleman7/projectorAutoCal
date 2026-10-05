@@ -92,18 +92,34 @@ D:\projectorAutoCal\
 
 ### ESC/VP21 Command Tokens
 
-The 5040UB does NOT publish its token names. Run `--probe` mode first:
-- Send `CANDIDATE?\r` for every known candidate token
-- Record which respond with `CANDIDATE=VALUE:` instead of `ERR`
-- Write verified tokens to `configs/command_table.json`
+Source: Epson's ESC/VP21 command list
+(https://files.support.epson.com/pdf/escvp21/escvp21all_en_revs_20250717.zip), sheet
+"TW9300" — it covers the HC5040UB. Verified live against a 5040UB.
 
-Token categories needed: `white_balance.{R,G,B}`, `picture_mode.{sdr,hdr10}`, `cms.{axis}.{HUE,SAT,LUM}`
+- **Control4/AMX must be enabled** in the projector's Network menu. Without it only
+  status queries (`PWR?`, `LAMP?`, `SIGNAL?`) answer; every settings query returns `ERR`.
+- WB gain: `GAINR` / `GAING` / `GAINB` (0–255). Offsets: `OFFSETR/G/B` (unused).
+  Writes are **quantized to ~2.5-unit steps** (`GAINR 127` reads back 126).
+- Picture mode: `CMODE` (06 Dynamic, 07 Natural, 0C Bright Cinema, 15 Cinema,
+  22 Digital Cinema). HDR mode: `DYNRANGE` (00 Auto, 01 SDR, 02–05 HDR Mode 1–4).
+- **No CMS (RGBCMY hue/sat/brightness) commands exist.** `CSEL?` is read-only;
+  `KEY 89` only presses the remote's RGBCMY button. CMS is a guided manual phase.
+- `SIGNAL?` is a status query — never treat it as a picture-mode command.
 
-Known candidates to try (across firmware versions):
-- WB R: `["WBALGAINR", "WBGAINR", "CRED", "WBRED", "BCRED", "RGAIN"]`
-- WB G: `["WBALGAING", "WBGAING", "CGRN", "WBGRN", "BCGRN", "GGAIN"]`
-- WB B: `["WBALGAINB", "WBGAINB", "CBLU", "WBBLU", "BCBLU", "BGAIN"]`
-- CMS Hue: `CMSRHUE/CMSGHUE/CMSBHUE/CMSCHUE/CMSMHUE/CMSYHUE` (or `CMSR1` etc.)
+The probe (`/api/probe`) first checks `PWR?` (fails fast on a dead link), then tries
+the WB candidates (`GAINx` first) and `CMODE?`/`DYNRANGE?`, and writes
+`configs/command_table.json`:
+
+```json
+{
+  "white_balance": {"R": "GAINR", "G": "GAING", "B": "GAINB"},
+  "picture_mode": {"sdr": [["CMODE", "07"]], "hdr10": [["DYNRANGE", "05"]]}
+}
+```
+
+`picture_mode.<mode>` is a list of `[command, value]` pairs sent in order. SDR does not
+touch `DYNRANGE` (forcing SDR would also force later HDR sources to SDR). A legacy bare
+string value is still accepted and sent as `<picture_mode.command | hdr.picture_mode_command> <value>`.
 
 ### ArgyllCMS spotread Subprocess
 
@@ -212,16 +228,19 @@ Phase 1 — White Balance:
 - Display white patch, adjust R/G/B gains toward D65 (each reading normalized to Y=100 → chromaticity-only ΔE)
 - G is the fixed reference channel (its error is 0 by construction); R and B move
 - `gain_delta = -round(channel_err × step_scale × gain_range)` where `channel_err = (meas − target) / target`
+- A nonzero delta smaller than `wb_gain_min_step` (default 3) is widened to it — the
+  5040UB ignores ±1 writes, which would stall the loop and trip the divergence guard
+- After each write the gain is read back; the loop tracks what the projector stored
 
-Phase 2 — CMS (6 axes: red, green, blue, cyan, magenta, yellow):
-- Display each primary/secondary patch
-- Hue error: angular difference in Lab ab-plane (degrees), `target − measured`
-- Sat error: chroma ratio `(chroma_target - chroma_meas) / chroma_target`
-- Lum error: `(L_target - L_meas) / 100`
-- Deltas move *toward* target assuming positive control = more hue-angle/sat/lum:
-  `hue_delta = +round(hue_err_deg × step_scale)`, `sat_delta = +round(sat_err × step_scale × 10)`,
-  `lum_delta = +round(lum_err × step_scale × 10)`. If a projector axis is inverted,
-  the divergence guard reverts instead of walking away.
+Phase 2 — CMS, guided (6 axes: red, green, blue, cyan, magenta, yellow):
+- The 5040UB has no CMS commands, so the user adjusts the RGBCMY menu by hand
+- Display each patch, measure; if ΔE ≥ threshold emit `cms_guidance` and block until
+  the user answers via `POST /api/run/cms-action` (`remeasure` or `next`); abort releases the wait
+- Guidance (`engine.cms_guidance`), largest error first: hue as "shift toward <neighbor>"
+  (Lab hue wheel red→yellow→green→cyan→blue→magenta; convention-free, since the menu's
+  Hue +/- direction is unknown), saturation as chroma % low/high, brightness as L* low/high
+- No writes to the projector, no step decay, no divergence guard in this phase
+- Non-interactive engines (tests, `interactive_cms=False`) measure each axis once
 
 Phase 3 — Verification:
 - Measure all 9 patches without applying corrections (white first — it re-anchors the reference)
@@ -250,6 +269,8 @@ All engine events are broadcast as JSON objects. Key events:
 {"event": "patch_start",    "patch": "white", "iteration": 1, "mode": "wb|cms|verify"}
 {"event": "measurement",    "patch": "white", "xyz": [X,Y,Z], "delta_e": 0.42}
 {"event": "correction",     "patch": "white", "axis": "WB_R", "before": 128, "after": 131}
+{"event": "cms_guidance",   "patch": "red", "iteration": 1, "delta_e": 3.2,
+                            "guidance": [{"control": "hue|saturation|brightness", "error": -4.1, "instruction": "Shift Hue toward magenta (4.1° off)"}]}
 {"event": "patch_done",     "patch": "white", "delta_e": 0.38, "iterations": 4, "converged": true}
    // patch_done delta_e is null when the patch was never measured (aborted run)
 {"event": "phase_done",     "phase": "wb"}
@@ -276,6 +297,7 @@ All engine events are broadcast as JSON objects. Key events:
 | POST   | `/api/probe` | Start probe in background thread |
 | POST   | `/api/run` | Start calibration (`{mode, phase, dry_run}`) |
 | POST   | `/api/run/stop` | Send abort signal to engine |
+| POST   | `/api/run/cms-action` | Answer a `cms_guidance` prompt (`{action: "remeasure" \| "next"}`) |
 | GET    | `/api/warmup` | Single colorimeter reading for warm-up monitor |
 | GET    | `/api/profiles` | List all saved profiles |
 | POST   | `/api/profiles` | Save current projector state as profile |
@@ -359,7 +381,7 @@ Results cached to `discovery/last_scan.json` (gitignored).
   "pgen": { "host": "192.168.1.101", "port": 85, "patch_settle_ms": 500 },
   "calibration": {
     "delta_e_threshold": 1.0, "max_iterations_per_patch": 20,
-    "wb_gain_center": 128, "wb_gain_range": [0, 255],
+    "wb_gain_center": 128, "wb_gain_range": [0, 255], "wb_gain_min_step": 3,
     "proportional_gain_initial": 0.8, "proportional_gain_minimum": 0.1,
     "cms_axis_order": ["red","green","blue","cyan","magenta","yellow"]
   },
@@ -387,7 +409,7 @@ Results cached to `discovery/last_scan.json` (gitignored).
 
 6. **PGenerator has no ACK**: After sending 3 bytes, there is no response. An open TCP connection and no `OSError` = success.
 
-7. **command_table.json must be probed first**: The default file has placeholder token names. Run `/api/probe` (or `projector-cal --probe` if CLI mode added) before first calibration. The placeholder file carries a `"_note"` key which `load_command_table` deliberately preserves — `probe.is_command_table_complete()` treats its presence as "not probed yet" (the probe writes the table without it). Do not strip `_note` on load.
+7. **command_table.json must be probed first**: The default file has Epson's documented tokens, unverified against the user's projector. Run `/api/probe` (or `projector-cal --probe` if CLI mode added) before first calibration. The placeholder file carries a `"_note"` key which `load_command_table` deliberately preserves — `probe.is_command_table_complete()` treats its presence as "not probed yet" (the probe writes the table without it). Do not strip `_note` on load.
 
 8. **SDR and HDR settings are independent on 5040UB**: Calibrating in SDR does not affect HDR settings and vice versa. Run separate calibration sessions for each mode.
 
@@ -407,7 +429,11 @@ Results cached to `discovery/last_scan.json` (gitignored).
 
 16. **Dummy measurements are dry-run only**: `server.py` refuses a real (non-dry) run when the colorimeter module is unavailable. Driving corrections from random readings would walk the projector's settings randomly.
 
-17. **CMS correction signs assume positive control = more hue-angle/sat/lum** and move toward the target (same convention as WB). The engine's divergence guard reverts to best-known values if a projector axis turns out inverted — do not reintroduce the old negated deltas, which moved *away* from target.
+17. **CMS is not automatable on the 5040UB**: there are no RGBCMY commands over ESC/VP21 (checked against Epson's list and ~900 undocumented guesses). Phase 2 is guided manual adjustment; profiles store `cms_values: {}`, and `apply_profile` only logs old CMS values. Don't reintroduce `get_cms`/`set_cms`.
+
+18. **Gain writes are quantized** (~2.5 units): ±1 writes are accepted but change nothing. Keep `wb_gain_min_step` and the read-back after `set_wb_gain`.
+
+19. **Control4/AMX off ⇒ all settings ERR**: if the probe finds `PWR?` answering but no WB token, that is the cause — not wrong token names.
 
 ---
 
@@ -438,7 +464,7 @@ python -m projector_cal
 | Tab | Key features |
 |-----|-------------|
 | **Setup** | Guided flow: workflow progress strip, then numbered steps — 1 connections (Save & Test persists fields via POST /api/config; the run reads the saved config, not the fields), 2 command probe, 3 screen info (optional), 4 placement checklist, 5 warm-up + pre-flight validation; AI settings card at the bottom. Step checkmarks driven by GET /api/setup/status + client state |
-| **Run** | Readiness banner (warns if command table unprobed or colorimeter unavailable on host), mode/phase selector with first-run guidance, dry-run toggle, start/stop (Start re-saves Setup fields first), patch grid with live ΔE, progress bar, live log |
+| **Run** | Readiness banner (warns if command table unprobed or colorimeter unavailable on host), mode/phase selector with first-run guidance, dry-run toggle, start/stop (Start re-saves Setup fields first), guided-CMS card (instructions + Re-measure / Accept & next), patch grid with live ΔE, progress bar, live log |
 | **Before/After** | ΔE comparison table (before = initial ΔE, after = verify pass), AI Analysis card (grade + issues + recommendations) |
 | **Profiles** | Grouped by mode, apply/delete buttons, save-current-state, AI profile comparison |
 

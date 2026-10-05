@@ -158,10 +158,11 @@
           <span class="step-status" id="step-status-probe"></span>
         </div>
         <p class="text-dim mb-16" style="font-size:13px">
-          Epson doesn't publish the 5040UB's command names, and they vary by firmware.
-          The probe asks your projector which tokens it understands and saves them to
-          <code>configs/command_table.json</code> — calibration can't adjust anything
-          without them. Run it once; the green check sticks for future sessions.
+          The probe confirms your projector accepts the white-balance and picture-mode
+          commands and saves them to <code>configs/command_table.json</code> — calibration
+          can't adjust anything without them. First enable <strong>Control4/AMX</strong> in the
+          projector's Network menu; without it the 5040UB rejects every settings command.
+          Run it once; the green check sticks for future sessions.
         </p>
         <button class="btn" onclick="runProbe()">Run Probe</button>
         <div id="probe-output" class="log mt-16 hidden"></div>
@@ -339,9 +340,9 @@
           <div class="field" style="flex:1; margin:0">
             <label>Phase</label>
             <select id="run-phase">
-              <option value="all">All (WB + CMS + Verify)</option>
+              <option value="all">All (WB + guided CMS + Verify)</option>
               <option value="wb">White Balance Only</option>
-              <option value="cms">CMS Only</option>
+              <option value="cms">Guided CMS Only</option>
             </select>
           </div>
           <div class="field" style="flex:1; margin:0">
@@ -359,8 +360,10 @@
         <div class="text-dim mb-16" style="font-size:12px; line-height:1.7">
           <strong>First time?</strong> Tick <em>Dry Run</em> to watch the full measure-and-correct
           loop without changing anything on the projector.
-          <em>All</em> runs the three phases in order: white balance → color correction (CMS) →
-          a final verification pass. The projector stores SDR and HDR10 settings separately,
+          <em>All</em> runs the three phases in order: automatic white balance → guided color
+          correction (CMS) → a final verification pass. The 5040UB can't adjust CMS over the network,
+          so for each color the app tells you what to change in the projector's RGBCMY menu and
+          waits while you do it. The projector stores SDR and HDR10 settings separately,
           so calibrate each mode in its own session.
         </div>
 
@@ -371,6 +374,25 @@
             <span id="run-progress-label">0 / 0 patches</span>
           </div>
           <div class="progress-bar"><div class="progress-fill" id="run-progress-fill" style="width:0%"></div></div>
+        </div>
+      </div>
+
+      <!-- Guided CMS prompt (shown while the engine waits on the user) -->
+      <div class="card hidden" id="cms-guide">
+        <div class="card-title">Adjust <span id="cms-guide-axis"></span> by hand</div>
+        <div class="mb-8">
+          ΔE <span class="text-mono" id="cms-guide-de"></span>
+          <span class="text-dim">(reading <span id="cms-guide-iter"></span>)</span>
+        </div>
+        <ol id="cms-guide-list" class="mb-16" style="margin-left:20px; line-height:1.8"></ol>
+        <div class="text-dim mb-16" style="font-size:12px; line-height:1.7">
+          Press <strong>RGBCMY</strong> on the remote, select <span id="cms-guide-axis2"></span>, and make
+          the largest change first — a step or two at a time. Close the menu before re-measuring
+          so it doesn't affect the reading.
+        </div>
+        <div class="flex gap-8">
+          <button class="btn" onclick="cmsAction('remeasure')">Re-measure</button>
+          <button class="btn btn-success" onclick="cmsAction('next')">Accept &amp; next color</button>
         </div>
       </div>
 

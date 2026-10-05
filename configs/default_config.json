@@ -25,6 +25,7 @@
     "max_iterations_per_patch": 20,
     "wb_gain_center": 128,
     "wb_gain_range": [0, 255],
+    "wb_gain_min_step": 3,
     "proportional_gain_initial": 0.8,
     "proportional_gain_minimum": 0.1,
     "cms_axis_order": ["red", "green", "blue", "cyan", "magenta", "yellow"]

@@ -215,7 +215,13 @@ function handleEvent(ev) {
       logLine(`  correction ${ev.axis}: ${ev.before} → ${ev.after}`, 'log-info');
       break;
 
+    case 'cms_guidance':
+      showCmsGuide(ev);
+      logLine(`  ${ev.patch}: ` + ev.guidance.map(g => g.instruction).join('; '), 'log-info');
+      break;
+
     case 'patch_done':
+      hideCmsGuide();
       setPatchDone(ev.patch, ev.delta_e, ev.converged);
       state.donePatches++;
       updateProgress();
@@ -699,7 +705,39 @@ async function stopRun() {
   await fetch('/api/run/stop', { method: 'POST' });
 }
 
+function showCmsGuide(ev) {
+  const name = ev.patch.charAt(0).toUpperCase() + ev.patch.slice(1);
+  document.getElementById('cms-guide-axis').textContent = name;
+  document.getElementById('cms-guide-axis2').textContent = name;
+  document.getElementById('cms-guide-de').textContent = ev.delta_e.toFixed(2);
+  document.getElementById('cms-guide-iter').textContent = ev.iteration;
+  const list = document.getElementById('cms-guide-list');
+  list.innerHTML = '';
+  ev.guidance.forEach(g => {
+    const li = document.createElement('li');
+    li.textContent = g.instruction;
+    list.appendChild(li);
+  });
+  document.querySelectorAll('#cms-guide button').forEach(b => { b.disabled = false; });
+  document.getElementById('cms-guide').classList.remove('hidden');
+}
+
+function hideCmsGuide() {
+  document.getElementById('cms-guide').classList.add('hidden');
+}
+
+async function cmsAction(action) {
+  // Disable until the next prompt so a double-click can't answer it too
+  document.querySelectorAll('#cms-guide button').forEach(b => { b.disabled = true; });
+  await fetch('/api/run/cms-action', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action }),
+  });
+}
+
 function finishRun() {
+  hideCmsGuide();
   document.getElementById('start-btn').classList.remove('hidden');
   document.getElementById('stop-btn').classList.add('hidden');
   document.querySelectorAll('.patch-cell').forEach(c => c.classList.remove('active'));

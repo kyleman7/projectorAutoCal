@@ -1,20 +1,12 @@
 {
-  "_note": "Placeholder command tokens. Run --probe from the web UI to auto-discover the correct tokens for your 5040UB.",
+  "_note": "Tokens from Epson's ESC/VP21 command list for the 5040UB, not yet verified against your projector. Run the probe from the web UI (with Control4/AMX enabled in the projector's Network menu) to confirm them.",
   "white_balance": {
-    "R": "WBALGAINR",
-    "G": "WBALGAING",
-    "B": "WBALGAINB"
+    "R": "GAINR",
+    "G": "GAING",
+    "B": "GAINB"
   },
   "picture_mode": {
-    "sdr": "CINEMA",
-    "hdr10": "HDR4"
-  },
-  "cms": {
-    "red":     { "HUE": "CMSRHUE", "SAT": "CMSRSAT", "LUM": "CMSRLUM" },
-    "green":   { "HUE": "CMSGHUE", "SAT": "CMSGSAT", "LUM": "CMSGLUM" },
-    "blue":    { "HUE": "CMSBHUE", "SAT": "CMSBSAT", "LUM": "CMSBLUM" },
-    "cyan":    { "HUE": "CMSCHUE", "SAT": "CMSCSAT", "LUM": "CMSCLUM" },
-    "magenta": { "HUE": "CMSMHUE", "SAT": "CMSMSAT", "LUM": "CMSMLUM" },
-    "yellow":  { "HUE": "CMSYHUE", "SAT": "CMSYSAT", "LUM": "CMSYLUM" }
+    "sdr":   [["CMODE", "07"]],
+    "hdr10": [["DYNRANGE", "05"]]
   }
 }

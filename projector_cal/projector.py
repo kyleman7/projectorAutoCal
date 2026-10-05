@@ -8,6 +8,13 @@ Both transports speak identical ESC/VP21 framing:
   SET:    b"TOKEN VALUE\\r"  → b":"  (success) or b"ERR"
   QUERY:  b"TOKEN?\\r"       → b"TOKEN=VALUE:\\r" or b"ERR"
 
+5040UB notes (Epson ESC/VP21 command list, "TW9300" sheet, verified live):
+  - Over the network, only status queries (PWR/LAMP/SIGNAL) answer until
+    Control4/AMX is enabled in the projector's Network menu; settings return ERR.
+  - WB gains (GAINR/G/B, 0–255) are quantized to ~2.5-unit steps.
+  - There are no RGBCMY (CMS) commands — CMS is adjusted by hand from the
+    projector menu, guided by the engine's phase 2.
+
 Usage:
     # TCP (default)
     with ProjectorClient.from_config(config) as proj:
@@ -418,15 +425,7 @@ class ProjectorClient:
                 f"No command token for white_balance.{channel} — run probe first"
             )
 
-    def _cms_token(self, axis: str, prop: Literal["HUE", "SAT", "LUM"]) -> str:
-        try:
-            return self._command_table["cms"][axis][prop]
-        except KeyError:
-            raise ProjectorError(
-                f"No command token for cms.{axis}.{prop} — run probe first"
-            )
-
-    def _picture_mode_token(self, mode: Literal["sdr", "hdr10"]) -> str:
+    def _picture_mode_token(self, mode: Literal["sdr", "hdr10"]) -> str | list:
         try:
             return self._command_table["picture_mode"][mode]
         except KeyError:
@@ -454,48 +453,42 @@ class ProjectorClient:
         logger.info("WB %s → %d", channel, value)
 
     # ------------------------------------------------------------------
-    # CMS
-    # ------------------------------------------------------------------
-
-    def get_cms(self, axis: str, prop: Literal["HUE", "SAT", "LUM"]) -> int:
-        token = self._cms_token(axis, prop)
-        value = self._send_query(token)
-        try:
-            return int(value)
-        except ValueError:
-            raise ProjectorError(
-                f"Non-integer CMS response for {axis}.{prop}: {value!r}"
-            )
-
-    def set_cms(self, axis: str, prop: Literal["HUE", "SAT", "LUM"], value: int) -> None:
-        token = self._cms_token(axis, prop)
-        self._send_command(token, str(value))
-        logger.info("CMS %s.%s → %d", axis, prop, value)
-
-    # ------------------------------------------------------------------
     # Picture Mode
     # ------------------------------------------------------------------
 
     def set_picture_mode(self, mode: Literal["sdr", "hdr10"], fallback_command: str | None = None) -> None:
-        """Switch picture mode by sending ``<command> <value>`` (e.g. ``PMOD HDR4``).
+        """Switch picture mode for the requested signal type.
 
-        The mode *value* comes from the command table (picture_mode.sdr/hdr10).
-        The *command* token resolves here and only here: probed
-        picture_mode.command → caller-supplied fallback (e.g. hdr config) →
-        "PMOD". Callers must not re-derive the command themselves.
+        picture_mode.<mode> in the command table is either a list of
+        ``[command, value]`` pairs sent in order (5040UB: ``[["CMODE", "07"]]``
+        for SDR, ``[["DYNRANGE", "05"]]`` for HDR Mode 4), or a legacy bare
+        value sent as ``<command> <value>`` where the command resolves from
+        picture_mode.command → caller-supplied fallback → "PMOD".
         """
-        value = self._picture_mode_token(mode)
-        cmd = (
-            self._command_table.get("picture_mode", {}).get("command")
-            or fallback_command
-            or "PMOD"
-        )
-        self._send_command(cmd, value)
-        logger.info("Picture mode → %s ('%s %s')", mode, cmd, value)
+        entry = self._picture_mode_token(mode)
+        if isinstance(entry, list):
+            steps = [(str(cmd), str(value)) for cmd, value in entry]
+        else:
+            cmd = (
+                self._command_table.get("picture_mode", {}).get("command")
+                or fallback_command
+                or "PMOD"
+            )
+            steps = [(cmd, str(entry))]
+        for cmd, value in steps:
+            self._send_command(cmd, value)
+        logger.info("Picture mode → %s (%s)", mode, ", ".join(f"'{c} {v}'" for c, v in steps))
 
     # ------------------------------------------------------------------
     # Probe helper
     # ------------------------------------------------------------------
+
+    def get_power_status(self) -> str:
+        """Query PWR? — answered by every ESC/VP21 projector, even in standby.
+
+        Used as a liveness check: raises ProjectorError if the link is dead.
+        """
+        return self._send_query("PWR")
 
     def probe_command(self, candidate: str) -> tuple[bool, str | None]:
         """Query a candidate token; return (accepted, value) or (False, None)."""

@@ -2,7 +2,9 @@
 
 Three phases:
   Phase 1 — White Balance: adjust R/G/B gains to hit D65 white point on the white patch.
-  Phase 2 — CMS: per-axis Hue/Sat/Lum corrections for all 6 color axes.
+  Phase 2 — CMS (guided): the 5040UB exposes no RGBCMY commands over ESC/VP21,
+             so each color axis is measured and the user is told which menu
+             control to move; they adjust by hand, then re-measure or move on.
   Phase 3 — Verification: final measurement pass, no corrections, produces the report.
 
 The engine is hardware-agnostic: it depends on ProjectorClient, a PatchDisplay adapter,
@@ -15,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import math
+import queue
 from dataclasses import dataclass, field
 from typing import Callable, Literal
 
@@ -40,6 +43,16 @@ _VERIFY_PATCHES = ["white", "red", "green", "blue", "cyan", "magenta", "yellow",
 # best-known settings and stops (protects against a wrong control-direction
 # assumption or an unstable loop walking the projector away from target).
 _MAX_WORSENING_ITERATIONS = 3
+
+# Lab hue angle increases red → yellow → green → cyan → blue → magenta → red,
+# so "toward the next color" is a convention-free way to describe a hue
+# correction — the projector's own Hue +/- direction per axis is unknown.
+_HUE_WHEEL = ["red", "yellow", "green", "cyan", "blue", "magenta"]
+
+# Below these, a CMS component is not worth telling the user to touch
+_GUIDE_MIN_HUE_DEG = 1.0
+_GUIDE_MIN_SAT_PCT = 2.0
+_GUIDE_MIN_LUM = 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -129,6 +142,9 @@ class CalibrationEngine:
         anomaly_check: Optional callable(patch, recent_xyz, recent_de) -> dict
             (see agents.anomaly_detector.detect_anomaly). Called every 3rd
             iteration; its "action" may retry a measurement or abort the patch.
+        interactive_cms: If True, guided CMS waits after each guidance event
+            for submit_cms_action() ("remeasure" or "next"). If False, each
+            axis is measured once and its guidance reported.
     """
 
     def __init__(
@@ -141,6 +157,7 @@ class CalibrationEngine:
         dry_run: bool = False,
         on_event: EventCallback = _noop_event,
         anomaly_check: Callable[[str, list, list], dict] | None = None,
+        interactive_cms: bool = False,
     ) -> None:
         self.projector = projector
         self.display = display
@@ -150,12 +167,19 @@ class CalibrationEngine:
         self.dry_run = dry_run
         self.on_event = on_event
         self.anomaly_check = anomaly_check
+        self.interactive_cms = interactive_cms
+        self._cms_actions: queue.Queue[str] = queue.Queue()
         self._abort = False
         self._ref_white_Y: float | None = None
 
     def abort(self) -> None:
         """Signal the engine to stop after the current iteration."""
         self._abort = True
+        self._cms_actions.put("abort")  # release a pending guided-CMS wait
+
+    def submit_cms_action(self, action: str) -> None:
+        """User response to a cms_guidance event: "remeasure" or "next"."""
+        self._cms_actions.put(action)
 
     # ------------------------------------------------------------------
     # Top-level entry points
@@ -210,10 +234,10 @@ class CalibrationEngine:
     # Shared correction loop
     # ------------------------------------------------------------------
     #
-    # Both correction phases (WB and CMS) run the same closed loop: measure →
-    # normalize → ΔE → converge/diverge checks → anomaly check → compute and
-    # apply a proportional correction → decay the step. Only the normalization
-    # and the correction physics differ, so they are injected as callables.
+    # The automatic (WB) phase runs a closed loop: measure → normalize → ΔE →
+    # converge/diverge checks → anomaly check → compute and apply a
+    # proportional correction → decay the step. The normalization and the
+    # correction physics are injected as callables.
 
     def _correction_loop(
         self,
@@ -324,18 +348,26 @@ class CalibrationEngine:
         new: dict,
         axis_names: dict[str, str],
         setter: Callable[[str, int], None],
+        read_back: Callable[[str], int] | None = None,
     ) -> None:
-        """Diff `new` against `current`, emit correction events, and write changed
-        values to the projector (unless dry-run); mutates `current` in place."""
+        """Diff `new` against `current`, write changed values to the projector
+        (unless dry-run), and emit correction events; mutates `current` in place.
+
+        With `read_back`, `current` records the value the projector actually
+        stored — the 5040UB quantizes gains, so the requested value can differ.
+        """
         for key in current:
             if new[key] != current[key]:
-                self.on_event({
-                    "event": "correction", "patch": patch, "axis": axis_names[key],
-                    "before": current[key], "after": new[key],
-                })
+                actual = new[key]
                 if not self.dry_run:
                     setter(key, new[key])
-                current[key] = new[key]
+                    if read_back is not None:
+                        actual = read_back(key)
+                self.on_event({
+                    "event": "correction", "patch": patch, "axis": axis_names[key],
+                    "before": current[key], "after": actual,
+                })
+                current[key] = actual
 
     def _emit_patch_result(self, outcome: _LoopOutcome, patch_name: str) -> PatchResult:
         """Build the PatchResult for a loop outcome and emit its patch_done event."""
@@ -361,6 +393,7 @@ class CalibrationEngine:
         cfg = self.config
         gain_lo, gain_hi = cfg.wb_gain_range
         gain_range = gain_hi - gain_lo
+        min_step = cfg.wb_gain_min_step
         target_lab = get_target_lab("white", self.mode)
         target_x, target_y, _ = get_target_xyY("white", self.mode)
         # D65 target at the normalized luminance — loop-invariant
@@ -391,15 +424,15 @@ class CalibrationEngine:
             g_err = (Yn - target_Y) / max(target_Y, 1e-6)
             b_err = (Zn - target_Z) / max(target_Z, 1e-6)
             return {
-                "R": _clamp(current["R"] - round(r_err * step_scale * gain_range), gain_lo, gain_hi),
-                "G": _clamp(current["G"] - round(g_err * step_scale * gain_range), gain_lo, gain_hi),
-                "B": _clamp(current["B"] - round(b_err * step_scale * gain_range), gain_lo, gain_hi),
+                ch: _clamp(current[ch] - _gain_delta(err, step_scale, gain_range, min_step), gain_lo, gain_hi)
+                for ch, err in (("R", r_err), ("G", g_err), ("B", b_err))
             }
 
         def apply(current: dict, new: dict) -> None:
             self._apply_settings("white", current, new,
                                  {"R": "WB_R", "G": "WB_G", "B": "WB_B"},
-                                 self.projector.set_wb_gain)
+                                 self.projector.set_wb_gain,
+                                 read_back=self.projector.get_wb_gain)
 
         outcome = self._correction_loop("white", "wb", gains, normalize, target_lab, corrections, apply)
 
@@ -416,9 +449,9 @@ class CalibrationEngine:
     # ------------------------------------------------------------------
 
     def _phase2_cms(self) -> list[PatchResult]:
-        """Adjust CMS Hue/Sat/Lum for each color axis."""
+        """Guided CMS: measure each color axis and tell the user what to adjust."""
         self.on_event({"event": "phase_start", "phase": "cms"})
-        logger.info("Phase 2: CMS [mode=%s]", self.mode)
+        logger.info("Phase 2: CMS (guided) [mode=%s]", self.mode)
         if self._ref_white_Y is None:
             self._measure_white_reference()
         results: list[PatchResult] = []
@@ -433,53 +466,67 @@ class CalibrationEngine:
         return results
 
     def _cms_axis(self, axis: str) -> PatchResult:
-        """Run the correction loop for one CMS axis."""
+        """Measure one axis; until it converges, emit guidance and wait for the user.
+
+        The user adjusts the projector's RGBCMY menu by hand between readings,
+        so there is no correction step, step decay, or divergence guard here.
+        """
+        cfg = self.config
         target_lab = get_target_lab(axis, self.mode)
+        initial_de: float | None = None
+        de = float("inf")
+        converged = False
+        iteration = 0
+        X = Y = Z = 0.0
 
-        cms = {
-            "HUE": self.projector.get_cms(axis, "HUE"),
-            "SAT": self.projector.get_cms(axis, "SAT"),
-            "LUM": self.projector.get_cms(axis, "LUM"),
-        }
+        self.display.display_patch(RGBPatch(*patch_rgb(axis)))
 
-        def normalize(xyz: tuple[float, float, float]) -> tuple[float, float, float]:
-            return self._to_relative(*xyz)
+        for iteration in range(1, cfg.max_iterations_per_patch + 1):
+            if self._abort:
+                break
 
-        def corrections(norm_xyz: tuple, meas_lab: tuple, current: dict, step_scale: float) -> dict:
-            # Decompose Lab error into Hue/Sat/Lum corrections
-            L_meas, a_meas, b_meas = meas_lab
-            L_tgt,  a_tgt,  b_tgt  = target_lab
+            self.on_event({"event": "patch_start", "patch": axis, "iteration": iteration, "mode": "cms"})
+            X, Y, Z = self.measure()
+            meas_lab = xyz_to_lab(*self._to_relative(X, Y, Z))
+            de = delta_e_2000(meas_lab, target_lab)
+            self.on_event({"event": "measurement", "patch": axis, "xyz": [X, Y, Z], "delta_e": de})
+            if initial_de is None:
+                initial_de = de
+            logger.info("CMS %s reading %d: ΔE=%.4f (target<%.2f)",
+                        axis, iteration, de, cfg.delta_e_threshold)
 
-            # Hue error: angular difference in the ab plane, normalized to (-180, 180)
-            hue_err_deg = math.degrees(math.atan2(b_tgt, a_tgt) - math.atan2(b_meas, a_meas))
-            hue_err_deg = (hue_err_deg + 180) % 360 - 180
+            if de < cfg.delta_e_threshold:
+                converged = True
+                break
 
-            # Saturation error: chroma ratio
-            chroma_meas = math.hypot(a_meas, b_meas)
-            chroma_tgt  = math.hypot(a_tgt,  b_tgt)
-            sat_ratio_err = (chroma_tgt - chroma_meas) / max(chroma_tgt, 1e-6)
+            self._drain_cms_actions()
+            self.on_event({
+                "event": "cms_guidance", "patch": axis, "iteration": iteration,
+                "delta_e": de, "guidance": cms_guidance(axis, meas_lab, target_lab),
+            })
+            if not self.interactive_cms or iteration == cfg.max_iterations_per_patch:
+                break
+            if self._wait_for_cms_action() != "remeasure":
+                break
 
-            # Luminance error
-            lum_err = (L_tgt - L_meas) / 100.0
-
-            # Errors are (target - measured); a positive control value is assumed
-            # to increase hue angle / saturation / luminance, so the correction
-            # moves each property toward its target. If the projector's control
-            # direction is inverted on some axis, the loop's divergence guard
-            # reverts to the best-known values instead of walking away.
-            return {
-                "HUE": current["HUE"] + round(hue_err_deg * step_scale),
-                "SAT": current["SAT"] + round(sat_ratio_err * step_scale * 10),
-                "LUM": current["LUM"] + round(lum_err * step_scale * 10),
-            }
-
-        def apply(current: dict, new: dict) -> None:
-            self._apply_settings(axis, current, new,
-                                 {"HUE": "HUE", "SAT": "SAT", "LUM": "LUM"},
-                                 lambda prop, value: self.projector.set_cms(axis, prop, value))
-
-        outcome = self._correction_loop(axis, "cms", cms, normalize, target_lab, corrections, apply)
+        outcome = _LoopOutcome(final_de=de, initial_de=initial_de, iterations=iteration,
+                               converged=converged, xyz=(X, Y, Z))
         return self._emit_patch_result(outcome, axis)
+
+    def _drain_cms_actions(self) -> None:
+        """Discard clicks left over from an earlier guidance prompt."""
+        while True:
+            try:
+                self._cms_actions.get_nowait()
+            except queue.Empty:
+                return
+
+    def _wait_for_cms_action(self) -> str:
+        """Block until the user answers the guidance prompt (or the run aborts)."""
+        if self._abort:
+            return "abort"
+        action = self._cms_actions.get()
+        return "abort" if self._abort else action
 
     # ------------------------------------------------------------------
     # Phase 3 — Verification
@@ -588,6 +635,63 @@ class CalibrationEngine:
 
 def _clamp(value: int, lo: int, hi: int) -> int:
     return max(lo, min(hi, value))
+
+
+def _gain_delta(err: float, step_scale: float, gain_range: int, min_step: int) -> int:
+    """Proportional gain change, widened to at least `min_step` when nonzero —
+    smaller writes fall inside the projector's quantization and change nothing."""
+    delta = round(err * step_scale * gain_range)
+    if delta and abs(delta) < min_step:
+        return min_step if delta > 0 else -min_step
+    return delta
+
+
+def cms_guidance(
+    axis: str,
+    meas_lab: tuple[float, float, float],
+    target_lab: tuple[float, float, float],
+) -> list[dict]:
+    """Describe what to change in the projector's RGBCMY menu for one axis.
+
+    Returns items ordered largest error first, each with the menu control
+    ("hue", "saturation", "brightness"), a signed error, and an instruction.
+    Hue is described as a shift toward a neighboring color rather than +/-,
+    because the projector's hue direction per axis is not known.
+    """
+    L_meas, a_meas, b_meas = meas_lab
+    L_tgt, a_tgt, b_tgt = target_lab
+
+    # (target − measured), normalized to (-180, 180]
+    hue_err = math.degrees(math.atan2(b_tgt, a_tgt) - math.atan2(b_meas, a_meas))
+    hue_err = (hue_err + 180) % 360 - 180
+    chroma_tgt = math.hypot(a_tgt, b_tgt)
+    sat_err_pct = (chroma_tgt - math.hypot(a_meas, b_meas)) / max(chroma_tgt, 1e-6) * 100
+    lum_err = L_tgt - L_meas
+
+    items: list[tuple[float, dict]] = []
+    if abs(hue_err) >= _GUIDE_MIN_HUE_DEG:
+        i = _HUE_WHEEL.index(axis)
+        toward = _HUE_WHEEL[(i + 1) % 6] if hue_err > 0 else _HUE_WHEEL[i - 1]
+        items.append((abs(hue_err) / _GUIDE_MIN_HUE_DEG, {
+            "control": "hue", "error": round(hue_err, 1),
+            "instruction": f"Shift Hue toward {toward} ({abs(hue_err):.1f}° off)",
+        }))
+    if abs(sat_err_pct) >= _GUIDE_MIN_SAT_PCT:
+        items.append((abs(sat_err_pct) / _GUIDE_MIN_SAT_PCT, {
+            "control": "saturation", "error": round(sat_err_pct, 1),
+            "instruction": f"{'Increase' if sat_err_pct > 0 else 'Decrease'} Saturation "
+                           f"({abs(sat_err_pct):.0f}% {'low' if sat_err_pct > 0 else 'high'})",
+        }))
+    if abs(lum_err) >= _GUIDE_MIN_LUM:
+        items.append((abs(lum_err) / _GUIDE_MIN_LUM, {
+            "control": "brightness", "error": round(lum_err, 1),
+            "instruction": f"{'Increase' if lum_err > 0 else 'Decrease'} Brightness "
+                           f"(L* {abs(lum_err):.1f} {'low' if lum_err > 0 else 'high'})",
+        }))
+    if not items:
+        return [{"control": "any", "error": 0.0,
+                 "instruction": "Small combined error — nudge one control a step at a time"}]
+    return [item for _, item in sorted(items, key=lambda t: t[0], reverse=True)]
 
 
 def _de_or_none(de: float) -> float | None:

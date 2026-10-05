@@ -162,7 +162,7 @@ class TestLoadCommandTable(object):
     def test_loads_default_table(self):
         table = load_command_table()
         assert "white_balance" in table
-        assert "cms" in table
+        assert "picture_mode" in table
 
     def test_custom_path(self, tmp_path):
         data = {"white_balance": {"R": "WBGAINR", "G": "WBGAING", "B": "WBGAINB"}}

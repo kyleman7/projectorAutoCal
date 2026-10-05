@@ -77,7 +77,7 @@ Evaluate each checklist item and determine if the system is ready to start calib
 Hardware status:
   Projector connected (ESC/VP.net handshake): {projector_connected}
   PGenerator connected (TCP): {pgen_connected}
-  Command table complete (all WB + CMS tokens): {command_table_complete}
+  Command table complete (WB gain tokens; CMS is adjusted by hand): {command_table_complete}
   Projector warmed up and stable (Y variance < 0.5%): {warm_up_stable}
   Colorimeter (spotread) detected: {colorimeter_detected}
   Screen info: {screen_desc}
@@ -135,7 +135,7 @@ def _rule_based_validate(
         {
             "item": "Command table complete",
             "pass": command_table_complete,
-            "note": "All WB and CMS tokens present" if command_table_complete
+            "note": "All WB gain tokens present" if command_table_complete
                     else "Run probe first to auto-discover command tokens",
         },
         {

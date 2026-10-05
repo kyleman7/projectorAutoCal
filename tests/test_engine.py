@@ -7,18 +7,20 @@ exercised without hardware. The simulated device model:
   factor = 1 + (gain - 128) / 256  (i.e. full gain range = ±50% output)
 - All readings are returned in "absolute" units (scaled by a brightness factor)
   to verify the engine's relative-colorimetry normalization.
-- CMS controls move measured Lab toward/away from target linearly.
+- CMS "menu" values (set by hand on the real projector) move measured Lab
+  linearly; tests change them between readings to simulate the user.
 """
 
 from __future__ import annotations
 
 import math
+import threading
 
 import pytest
 
 from projector_cal.color_math import D65_WHITE_XYZ, get_target_lab, xyY_to_XYZ
 from projector_cal.config import CalibrationConfig
-from projector_cal.engine import CalibrationEngine, _MAX_WORSENING_ITERATIONS
+from projector_cal.engine import CalibrationEngine, _MAX_WORSENING_ITERATIONS, _gain_delta, cms_guidance
 
 from colormath.color_conversions import convert_color
 from colormath.color_objects import LabColor, XYZColor
@@ -36,7 +38,7 @@ def lab_to_xyz(L: float, a: float, b: float) -> tuple[float, float, float]:
 
 
 class FakeProjector:
-    """Records WB/CMS settings; the measure functions read them back."""
+    """Records WB gains and the hand-set CMS menu; the measure functions read them."""
 
     def __init__(self, wb=None, cms=None):
         self.wb = dict(wb or {"R": 128, "G": 128, "B": 128})
@@ -50,12 +52,13 @@ class FakeProjector:
         self.wb[ch] = value
         self.set_calls += 1
 
-    def get_cms(self, axis, prop):
-        return self.cms[axis][prop]
 
-    def set_cms(self, axis, prop, value):
-        self.cms[axis][prop] = value
-        self.set_calls += 1
+
+class QuantizedProjector(FakeProjector):
+    """Stores gains in ~2.53-unit steps like the 5040UB: ±1 writes change nothing."""
+
+    def set_wb_gain(self, ch, value):
+        super().set_wb_gain(ch, round(round(value / 2.53) * 2.53))
 
 
 class FakeDisplay:
@@ -89,12 +92,16 @@ def make_config(**overrides) -> CalibrationConfig:
     return CalibrationConfig(**defaults)
 
 
-def wb_measure(projector: FakeProjector, brightness: float = 0.6):
-    """White-patch measurement: gains scale D65 channels; absolute cd/m² scale."""
+def wb_measure(projector: FakeProjector, brightness: float = 0.6, gain_scale: float = 256):
+    """White-patch measurement: gains scale D65 channels; absolute cd/m² scale.
+
+    gain_scale sets how strongly one gain unit moves its channel (larger =
+    finer control, so more gain steps are needed near the target).
+    """
     def _measure():
-        fr = 1 + (projector.wb["R"] - 128) / 256
-        fg = 1 + (projector.wb["G"] - 128) / 256
-        fb = 1 + (projector.wb["B"] - 128) / 256
+        fr = 1 + (projector.wb["R"] - 128) / gain_scale
+        fg = 1 + (projector.wb["G"] - 128) / gain_scale
+        fb = 1 + (projector.wb["B"] - 128) / gain_scale
         return (_D65[0] * fr * brightness, _D65[1] * fg * brightness, _D65[2] * fb * brightness)
     return _measure
 
@@ -172,6 +179,30 @@ class TestWhiteBalance:
         assert report.aborted
         assert not report.wb_result.converged
 
+    def test_converges_on_quantized_projector(self):
+        """Near the target the proportional delta shrinks to ±1, which the
+        quantized projector ignores — the loop stalls and the guard stops it
+        short. The minimum step must carry it to convergence."""
+        def run(min_step):
+            proj = QuantizedProjector(wb={"R": 144, "G": 128, "B": 116})
+            events = []
+            engine = CalibrationEngine(
+                projector=proj, display=FakeDisplay(),
+                measure=wb_measure(proj, gain_scale=1024),
+                config=make_config(wb_gain_min_step=min_step),
+                on_event=events.append,
+            )
+            return engine._phase1_white_balance(), events
+
+        stalled, _ = run(min_step=1)
+        assert not stalled.converged  # the failure this guards against
+
+        result, events = run(min_step=3)
+        assert result.converged, f"ΔE stayed at {result.final_delta_e}"
+        # Correction events report what the projector stored, not what was asked
+        for ev in (e for e in events if e["event"] == "correction"):
+            assert ev["after"] == round(round(ev["after"] / 2.53) * 2.53), ev
+
     def test_dry_run_never_writes_to_projector(self):
         proj = FakeProjector(wb={"R": 160, "G": 128, "B": 100})
         engine = CalibrationEngine(
@@ -204,30 +235,112 @@ def cms_measure(projector: FakeProjector, axis: str, brightness: float = 0.6):
     return _measure
 
 
-class TestCMS:
-    def test_corrections_move_toward_target(self):
-        """Undersaturated/dim/rotated red: all three controls must move positive.
+class TestGainDelta:
+    def test_small_nonzero_delta_widens_to_min_step(self):
+        assert _gain_delta(0.005, 0.8, 255, 3) == 3     # raw delta 1
+        assert _gain_delta(-0.005, 0.8, 255, 3) == -3
 
-        This is the regression test for the inverted CMS correction signs —
-        with the old signs SAT and LUM walked negative (away from target).
-        """
+    def test_zero_and_large_deltas_unchanged(self):
+        assert _gain_delta(0.001, 0.8, 255, 3) == 0     # raw delta 0
+        assert _gain_delta(0.05, 0.8, 255, 3) == 10
+
+
+class TestCmsGuidance:
+    def test_directions_move_toward_target(self):
+        """Red rotated toward yellow, undersaturated and dim → shift toward
+        magenta, increase saturation, increase brightness."""
+        L, a, b = get_target_lab("red", "sdr")
+        hue = math.atan2(b, a) + math.radians(6)        # rotated toward yellow
+        chroma = math.hypot(a, b) * 0.85
+        meas = (L - 4, chroma * math.cos(hue), chroma * math.sin(hue))
+
+        by_control = {g["control"]: g for g in cms_guidance("red", meas, (L, a, b))}
+        assert "toward magenta" in by_control["hue"]["instruction"]
+        assert by_control["saturation"]["instruction"].startswith("Increase")
+        assert by_control["brightness"]["instruction"].startswith("Increase")
+
+    def test_largest_error_listed_first(self):
+        L, a, b = get_target_lab("green", "sdr")
+        meas = (L - 10, a, b)                            # brightness only
+        guidance = cms_guidance("green", meas, (L, a, b))
+        assert guidance[0]["control"] == "brightness"
+        assert guidance[0]["instruction"].startswith("Increase")
+
+    def test_hue_wraps_from_magenta_to_red(self):
+        L, a, b = get_target_lab("magenta", "sdr")
+        hue = math.atan2(b, a) - math.radians(8)         # rotated toward blue
+        chroma = math.hypot(a, b)
+        meas = (L, chroma * math.cos(hue), chroma * math.sin(hue))
+        hue_item = next(g for g in cms_guidance("magenta", meas, (L, a, b)) if g["control"] == "hue")
+        assert "toward red" in hue_item["instruction"]
+
+
+def _guided_engine(proj, events, **kw):
+    engine = CalibrationEngine(
+        projector=proj, display=FakeDisplay(),
+        measure=cms_measure(proj, "red"),
+        config=make_config(),
+        on_event=events.append,
+        **kw,
+    )
+    engine._ref_white_Y = 60.0  # phase 1 normally provides this
+    return engine
+
+
+class TestGuidedCMS:
+    def test_non_interactive_measures_once_and_reports_guidance(self):
         proj = FakeProjector()
-        engine = CalibrationEngine(
-            projector=proj, display=FakeDisplay(),
-            measure=cms_measure(proj, "red"),
-            config=make_config(),
-        )
-        engine._ref_white_Y = 60.0  # phase 1 normally provides this
-        result = engine._cms_axis("red")
+        events = []
+        result = _guided_engine(proj, events)._cms_axis("red")
+        assert result.iterations == 1
+        assert not result.converged
+        guidance = [e for e in events if e["event"] == "cms_guidance"]
+        assert len(guidance) == 1 and guidance[0]["guidance"]
+        assert proj.set_calls == 0  # CMS never writes to the projector
 
-        ctl = proj.cms["red"]
-        assert ctl["HUE"] > 0, f"HUE moved the wrong way: {ctl}"
-        assert ctl["SAT"] > 0, f"SAT moved the wrong way: {ctl}"
-        assert ctl["LUM"] > 0, f"LUM moved the wrong way: {ctl}"
-        assert result.final_delta_e < result.initial_delta_e
+    def test_remeasure_after_manual_fix_converges(self):
+        proj = FakeProjector()
+        events = []
+        engine = _guided_engine(proj, events, interactive_cms=True)
+        out = {}
+        t = threading.Thread(target=lambda: out.setdefault("r", engine._cms_axis("red")))
+        t.start()
+        _wait_for(lambda: any(e["event"] == "cms_guidance" for e in events))
+        proj.cms["red"] = {"HUE": 5, "SAT": 5, "LUM": 2}   # user fixes it in the menu
+        engine.submit_cms_action("remeasure")
+        t.join(timeout=5)
+        assert not t.is_alive()
+        assert out["r"].converged
+        assert out["r"].iterations == 2
+        assert out["r"].final_delta_e < out["r"].initial_delta_e
+
+    def test_next_accepts_without_remeasuring(self):
+        proj = FakeProjector()
+        events = []
+        engine = _guided_engine(proj, events, interactive_cms=True)
+        engine.submit_cms_action("remeasure")   # stale click from an earlier prompt
+        out = {}
+        t = threading.Thread(target=lambda: out.setdefault("r", engine._cms_axis("red")))
+        t.start()
+        _wait_for(lambda: any(e["event"] == "cms_guidance" for e in events))
+        engine.submit_cms_action("next")
+        t.join(timeout=5)
+        assert out["r"].iterations == 1
+        assert not out["r"].converged
+
+    def test_abort_releases_pending_wait(self):
+        proj = FakeProjector()
+        events = []
+        engine = _guided_engine(proj, events, interactive_cms=True)
+        t = threading.Thread(target=engine._cms_axis, args=("red",))
+        t.start()
+        _wait_for(lambda: any(e["event"] == "cms_guidance" for e in events))
+        engine.abort()
+        t.join(timeout=5)
+        assert not t.is_alive()
 
     def test_measures_white_reference_before_cms_only_run(self):
-        """run_cms_only must anchor relative colorimetry before correcting."""
+        """run_cms_only must anchor relative colorimetry before measuring."""
         proj = FakeProjector()
         display = FakeDisplay()
 
@@ -243,6 +356,14 @@ class TestCMS:
         )
         engine._phase2_cms()
         assert engine._ref_white_Y == pytest.approx(60.0, rel=0.01)
+
+
+def _wait_for(cond, timeout=5.0):
+    import time
+    deadline = time.monotonic() + timeout
+    while not cond():
+        assert time.monotonic() < deadline, "timed out waiting for condition"
+        time.sleep(0.01)
 
 
 class TestStepDecay:

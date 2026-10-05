@@ -36,7 +36,7 @@ The colorimeter connects to the host machine via USB. It mounts on a **tripod ai
 **Three calibration phases:**
 
 1. **White Balance** — adjusts R/G/B gains to hit the D65 white point
-2. **CMS (6-axis)** — corrects Hue, Saturation, and Luminance for red, green, blue, cyan, magenta, and yellow independently
+2. **CMS (6-axis, guided)** — measures red, green, blue, cyan, magenta, and yellow and tells you which Hue / Saturation / Brightness control to change in the projector's RGBCMY menu (the 5040UB has no network commands for CMS), re-measuring after each adjustment
 3. **Verification** — final measurement pass across all 9 patches with no corrections applied
 
 Supports both **SDR (Rec.709/D65)** and **HDR10 (DCI P3/D65)** targets. SDR and HDR settings on the projector are independent — calibrate each separately.
@@ -46,7 +46,7 @@ Supports both **SDR (Rec.709/D65)** and **HDR10 (DCI P3/D65)** targets. SDR and 
 ## Features
 
 - **Auto-discovery** — scans your network via mDNS and parallel port scan to find the projector and Pi without manual IP entry
-- **Command probe** — auto-discovers the projector's ESC/VP21 command tokens (which Epson doesn't publish) before first calibration
+- **Command probe** — confirms the projector accepts the white-balance and picture-mode ESC/VP21 commands before first calibration
 - **Profile management** — save, apply, and compare calibration snapshots; swap between SDR and HDR10 profiles in seconds
 - **Dry-run mode** — runs the full calibration loop without sending corrections, for testing and previewing
 - **Warm-up monitor** — tracks colorimeter Y readings over time and unlocks calibration only when the lamp is thermally stable
@@ -116,7 +116,7 @@ calibration run use these addresses.
 
 ### 3. Run the probe (first run only)
 
-Click **Run Probe** (Setup, step 2). This queries the projector to discover which ESC/VP21 command tokens your specific firmware uses, and saves them to `configs/command_table.json`. You only need to do this once — calibration can't adjust anything without it, and the Run tab will warn you if it hasn't been done.
+First enable **Control4/AMX** in the projector's Network menu — without it the 5040UB rejects every settings command over the network. Then click **Run Probe** (Setup, step 2). This checks which ESC/VP21 command tokens your projector accepts and saves them to `configs/command_table.json`. You only need to do this once — calibration can't adjust anything without it, and the Run tab will warn you if it hasn't been done.
 
 ### 4. Warm up the projector
 
@@ -204,7 +204,7 @@ See [DESIGN.md](DESIGN.md) for full protocol specifications, algorithm details, 
 
 ## Technical Notes
 
-- **ESC/VP21** — proprietary Epson TCP protocol on port 3629; command tokens vary by firmware and must be probed
+- **ESC/VP21** — Epson's control protocol on TCP port 3629; settings commands need Control4/AMX enabled, gains are quantized to ~2.5-unit steps, and there are no CMS commands
 - **Color targets** — SDR uses Rec.709 primaries under D65; HDR10 uses DCI P3 primaries under D65 (not DCI-native white). The 5040UB covers ~100% DCI-P3 but not Rec.2020
 - **Lab conversions** — always performed under D65 illuminant, not D50 (which is what ArgyllCMS uses internally)
 - **Relative colorimetry** — the colorimeter reports absolute cd/m²; the engine measures a reference white and rescales every reading to white = 100 before comparing against targets

@@ -8,6 +8,10 @@ Algorithm:
   If the projector returns CANDIDATE=VALUE:, the token is valid and recorded.
   If it returns ERR, the token is rejected.
   Writes a verified command_table.json when done.
+
+The 5040UB has no RGBCMY (CMS) commands over ESC/VP21 (Epson's command list,
+"TW9300" sheet), so CMS is not probed — phase 2 of the engine guides the user
+through the projector menu instead.
 """
 
 from __future__ import annotations
@@ -17,7 +21,6 @@ import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
 
 from .projector import ProjectorClient, ProjectorError
 
@@ -27,71 +30,44 @@ _INTER_PROBE_SLEEP = 0.1  # seconds between probe queries to avoid flooding proj
 
 # ---------------------------------------------------------------------------
 # Candidate tables
-# All known ESC/VP21 token names that may correspond to each required slot
-# across different Epson firmware versions.
+# GAINx is Epson's documented token; the rest are guesses kept for other
+# firmware versions.
 # ---------------------------------------------------------------------------
 
 WB_CANDIDATES: dict[str, list[str]] = {
-    "R": ["WBALGAINR", "WBGAINR", "CRED", "WBRED", "BCRED", "RGAIN"],
-    "G": ["WBALGAING", "WBGAING", "CGRN", "WBGRN", "BCGRN", "GGAIN"],
-    "B": ["WBALGAINB", "WBGAINB", "CBLU", "WBBLU", "BCBLU", "BGAIN"],
+    "R": ["GAINR", "WBALGAINR", "WBGAINR", "CRED", "WBRED", "BCRED", "RGAIN"],
+    "G": ["GAING", "WBALGAING", "WBGAING", "CGRN", "WBGRN", "BCGRN", "GGAIN"],
+    "B": ["GAINB", "WBALGAINB", "WBGAINB", "CBLU", "WBBLU", "BCBLU", "BGAIN"],
 }
 
-CMS_CANDIDATES: dict[tuple[str, str], list[str]] = {
-    ("red",     "HUE"): ["CMSRHUE", "CMSR1", "CMSREDHUE",   "CMSHUE1"],
-    ("red",     "SAT"): ["CMSRSAT", "CMSR2", "CMSREDSAT",   "CMSSAT1"],
-    ("red",     "LUM"): ["CMSRLUM", "CMSR3", "CMSREDLUM",   "CMSLUM1"],
-    ("green",   "HUE"): ["CMSGHUE", "CMSG1", "CMSGRENHUE",  "CMSHUE2"],
-    ("green",   "SAT"): ["CMSGSAT", "CMSG2", "CMSGRENSAT",  "CMSSAT2"],
-    ("green",   "LUM"): ["CMSGLUM", "CMSG3", "CMSGRENSAT",  "CMSLUM2"],
-    ("blue",    "HUE"): ["CMSBHUE", "CMSB1", "CMSBLUEHUE",  "CMSHUE3"],
-    ("blue",    "SAT"): ["CMSBSAT", "CMSB2", "CMSBLUESAT",  "CMSSAT3"],
-    ("blue",    "LUM"): ["CMSBLUM", "CMSB3", "CMSBLUELUM",  "CMSLUM3"],
-    ("cyan",    "HUE"): ["CMSCHUE", "CMSC1", "CMSCYANHUE",  "CMSHUE4"],
-    ("cyan",    "SAT"): ["CMSCSAT", "CMSC2", "CMSCYANSAT",  "CMSSAT4"],
-    ("cyan",    "LUM"): ["CMSCLUM", "CMSC3", "CMSCYANLUM",  "CMSLUM4"],
-    ("magenta", "HUE"): ["CMSMHUE", "CMSM1", "CMSMAGHUE",   "CMSHUE5"],
-    ("magenta", "SAT"): ["CMSMSAT", "CMSM2", "CMSMAGSAT",   "CMSSAT5"],
-    ("magenta", "LUM"): ["CMSMLUM", "CMSM3", "CMSMAGLUM",   "CMSLUM5"],
-    ("yellow",  "HUE"): ["CMSYHUE", "CMSY1", "CMSYELHUE",   "CMSHUE6"],
-    ("yellow",  "SAT"): ["CMSYSAT", "CMSY2", "CMSYELSAT",   "CMSSAT6"],
-    ("yellow",  "LUM"): ["CMSYLUM", "CMSY3", "CMSYELLUM",   "CMSLUM6"],
+# Picture-mode switching on the 5040UB: CMODE selects the color mode, DYNRANGE
+# the HDR mode (00 Auto, 01 SDR, 02–05 HDR Mode 1–4). Each mode maps to the
+# [command, value] pairs sent in order by ProjectorClient.set_picture_mode.
+# SDR deliberately leaves DYNRANGE alone: forcing it would also force every
+# later HDR source to SDR.
+PICTURE_MODE_PRESETS: dict[str, list[list[str]]] = {
+    "sdr":   [["CMODE", "07"]],      # Natural — closest to Rec.709
+    "hdr10": [["DYNRANGE", "05"]],   # HDR Mode 4 — darkest / most accurate
 }
-
-# Picture mode switch candidates
-PICTURE_MODE_CANDIDATES: dict[str, list[str]] = {
-    "command": ["PMOD", "MMOD", "CMOD", "PCTMOD", "SIGNAL"],
-    "sdr_value":   ["CINEMA", "FILM", "NATURAL", "CINE", "SDR"],
-    "hdr10_value": ["HDR4", "HDR3", "HDR2", "HDR1", "HDR"],
-}
-
-
-_CMS_AXES = ("red", "green", "blue", "cyan", "magenta", "yellow")
 
 
 def is_command_table_complete(table: dict) -> bool:
-    """True when every required WB and CMS slot has a verified token.
+    """True when every required WB slot has a verified token.
 
     Shared by the setup validator and the /api/setup/status endpoint so
     "ready to calibrate" means the same thing everywhere.
     """
-    # The shipped placeholder file carries a "_note" marker; its tokens fill
-    # every slot but are unverified guesses — treat as not probed.
+    # The shipped placeholder file carries a "_note" marker; its tokens are
+    # unverified against this projector — treat as not probed.
     if table.get("_note"):
         return False
-    wb_ok = all(table.get("white_balance", {}).get(ch) for ch in ("R", "G", "B"))
-    cms_ok = all(
-        table.get("cms", {}).get(axis, {}).get(prop)
-        for axis in _CMS_AXES
-        for prop in ("HUE", "SAT", "LUM")
-    )
-    return wb_ok and cms_ok
+    return all(table.get("white_balance", {}).get(ch) for ch in ("R", "G", "B"))
 
 
 @dataclass
 class SlotResult:
     """Result for one required command slot."""
-    slot_id: str              # e.g., "wb.R" or "cms.red.HUE"
+    slot_id: str              # e.g., "wb.R"
     accepted_token: str | None = None
     current_value: str | None = None
     candidates_tried: list[str] = field(default_factory=list)
@@ -105,21 +81,11 @@ class SlotResult:
 class ProbeResult:
     """Full result from a probe run."""
     wb_slots: dict[str, SlotResult] = field(default_factory=dict)      # "R", "G", "B"
-    cms_slots: dict[str, SlotResult] = field(default_factory=dict)     # "red.HUE", etc.
-    picture_mode_command: str | None = None
-    picture_mode_sdr: str | None = None
-    picture_mode_hdr10: str | None = None
+    picture_mode: dict[str, list[list[str]]] = field(default_factory=dict)
 
     def missing_slots(self) -> list[str]:
         """Return list of required slot IDs that were not resolved."""
-        missing = []
-        for ch, slot in self.wb_slots.items():
-            if not slot.found:
-                missing.append(f"white_balance.{ch}")
-        for key, slot in self.cms_slots.items():
-            if not slot.found:
-                missing.append(f"cms.{key}")
-        return missing
+        return [f"white_balance.{ch}" for ch, slot in self.wb_slots.items() if not slot.found]
 
     def to_command_table(self) -> dict:
         """Serialize to command_table.json schema.
@@ -127,29 +93,11 @@ class ProbeResult:
         Only includes slots where a token was found; unresolved slots are left
         out so the user can fill them in manually if needed.
         """
-        table: dict = {"white_balance": {}, "picture_mode": {}, "cms": {}}
-
+        table: dict = {"white_balance": {}, "picture_mode": dict(self.picture_mode)}
         for ch in ("R", "G", "B"):
             slot = self.wb_slots.get(ch)
             if slot and slot.accepted_token:
                 table["white_balance"][ch] = slot.accepted_token
-
-        if self.picture_mode_command:
-            table["picture_mode"]["command"] = self.picture_mode_command
-            if self.picture_mode_sdr:
-                table["picture_mode"]["sdr"] = self.picture_mode_sdr
-            if self.picture_mode_hdr10:
-                table["picture_mode"]["hdr10"] = self.picture_mode_hdr10
-
-        cms_axes = ["red", "green", "blue", "cyan", "magenta", "yellow"]
-        for axis in cms_axes:
-            table["cms"][axis] = {}
-            for prop in ("HUE", "SAT", "LUM"):
-                key = f"{axis}.{prop}"
-                slot = self.cms_slots.get(key)
-                if slot and slot.accepted_token:
-                    table["cms"][axis][prop] = slot.accepted_token
-
         return table
 
     def summary_lines(self) -> list[str]:
@@ -167,21 +115,13 @@ class ProbeResult:
                 lines.append(f"  WB.{ch}  ✗  (tried: {tried})")
 
         lines.append("\nPicture Mode:")
-        if self.picture_mode_command:
-            lines.append(f"  command={self.picture_mode_command!r}  sdr={self.picture_mode_sdr!r}  hdr10={self.picture_mode_hdr10!r}")
+        if self.picture_mode:
+            for mode, steps in self.picture_mode.items():
+                lines.append(f"  {mode}: " + ", ".join(f"{c} {v}" for c, v in steps))
         else:
-            lines.append("  ✗ No picture mode command found")
+            lines.append("  ✗ CMODE/DYNRANGE not supported — switch modes manually")
 
-        lines.append("\nCMS:")
-        cms_axes = ["red", "green", "blue", "cyan", "magenta", "yellow"]
-        for axis in cms_axes:
-            for prop in ("HUE", "SAT", "LUM"):
-                key = f"{axis}.{prop}"
-                slot = self.cms_slots.get(key)
-                if slot and slot.found:
-                    lines.append(f"  {axis:8}.{prop}  ✓  {slot.accepted_token!r}={slot.current_value}")
-                else:
-                    lines.append(f"  {axis:8}.{prop}  ✗")
+        lines.append("\nCMS: not available over ESC/VP21 — guided manual adjustment in phase 2")
 
         missing = self.missing_slots()
         if missing:
@@ -201,7 +141,7 @@ def run_probe(
     Args:
         projector: Connected ProjectorClient instance.
         candidates: Override the built-in candidate tables (for testing).
-                    If None, uses WB_CANDIDATES and CMS_CANDIDATES.
+                    If None, uses WB_CANDIDATES.
         progress_cb: Optional callback called with status strings as the probe runs.
                      Used by the web server to stream progress via WebSocket.
 
@@ -213,9 +153,19 @@ def run_probe(
         if progress_cb:
             progress_cb(msg)
 
+    # probe_command() treats a timeout like ERR, so over a dead link every
+    # candidate reads as "rejected" and an empty table gets saved. Fail fast.
+    _report("Checking projector responds…")
+    try:
+        power = projector.get_power_status()
+    except ProjectorError as e:
+        raise ProjectorError(
+            f"Projector not responding to PWR? — check cabling (RS-232 may need a "
+            f"null-modem cable) and that the projector is powered: {e}"
+        ) from e
+    _report(f"  Projector responded (PWR={power})")
+
     wb_cands = (candidates or {}).get("white_balance") or WB_CANDIDATES
-    cms_cands = (candidates or {}).get("cms") or CMS_CANDIDATES
-    pm_cands = (candidates or {}).get("picture_mode") or PICTURE_MODE_CANDIDATES
 
     result = ProbeResult()
 
@@ -238,45 +188,21 @@ def run_probe(
             _report(f"  WB.{ch}: no token found (tried {slot.candidates_tried})")
         result.wb_slots[ch] = slot
 
-    # ---- Picture Mode --------------------------------------------------------
-    _report("Probing picture mode command…")
-    for cmd_token in pm_cands.get("command", []):
-        accepted, value = projector.probe_command(cmd_token)
-        time.sleep(_INTER_PROBE_SLEEP)
-        if accepted:
-            result.picture_mode_command = cmd_token
-            _report(f"  Picture mode command: '{cmd_token}' (current={value})")
-            # Try SDR and HDR10 values — we can't test-set them safely, so use
-            # the configured defaults for now.
-            result.picture_mode_sdr = pm_cands.get("sdr_value", ["CINEMA"])[0]
-            result.picture_mode_hdr10 = pm_cands.get("hdr10_value", ["HDR4"])[0]
-            break
-        else:
-            _report(f"  Picture mode '{cmd_token}' rejected")
-    if not result.picture_mode_command:
-        _report("  No picture mode command found")
+    if not any(slot.found for slot in result.wb_slots.values()):
+        _report("  ⚠ The projector answers PWR? but rejects settings queries — "
+                "enable Control4/AMX in the projector's Network menu, then probe again.")
 
-    # ---- CMS -----------------------------------------------------------------
-    _report("Probing CMS axes…")
-    cms_axes = ["red", "green", "blue", "cyan", "magenta", "yellow"]
-    for axis in cms_axes:
-        for prop in ("HUE", "SAT", "LUM"):
-            key = f"{axis}.{prop}"
-            slot = SlotResult(slot_id=f"cms.{key}")
-            for token in cms_cands.get((axis, prop), []):
-                slot.candidates_tried.append(token)
-                accepted, value = projector.probe_command(token)
-                time.sleep(_INTER_PROBE_SLEEP)
-                if accepted:
-                    slot.accepted_token = token
-                    slot.current_value = value
-                    _report(f"  CMS {axis}.{prop}: '{token}' = {value}")
-                    break
-                else:
-                    _report(f"  CMS {axis}.{prop}: '{token}' rejected")
-            if not slot.found:
-                _report(f"  CMS {axis}.{prop}: no token found")
-            result.cms_slots[key] = slot
+    # ---- Picture Mode --------------------------------------------------------
+    _report("Probing picture mode commands…")
+    supported = {}
+    for token in ("CMODE", "DYNRANGE"):
+        accepted, value = projector.probe_command(token)
+        time.sleep(_INTER_PROBE_SLEEP)
+        supported[token] = accepted
+        _report(f"  {token}: " + (f"current={value}" if accepted else "rejected"))
+    for mode, steps in PICTURE_MODE_PRESETS.items():
+        if all(supported.get(cmd) for cmd, _ in steps):
+            result.picture_mode[mode] = [list(step) for step in steps]
 
     return result
 

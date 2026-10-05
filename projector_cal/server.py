@@ -321,6 +321,7 @@ async def start_run(body: RunRequest) -> dict:
                 dry_run=body.dry_run,
                 on_event=_state.broadcast_event,
                 anomaly_check=anomaly_check,
+                interactive_cms=True,
             )
             _state._engine = engine
 
@@ -370,6 +371,19 @@ async def stop_run() -> dict:
         _state._engine.abort()
         return {"ok": True, "message": "Abort signal sent"}
     return {"ok": False, "message": "No calibration running"}
+
+
+class CmsActionRequest(BaseModel):
+    action: Literal["remeasure", "next"]
+
+
+@app.post("/api/run/cms-action")
+async def cms_action(body: CmsActionRequest) -> dict:
+    """Answer a cms_guidance prompt: re-measure the axis, or accept it and move on."""
+    if _state._engine is None:
+        raise HTTPException(409, detail="No calibration running")
+    _state._engine.submit_cms_action(body.action)
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------

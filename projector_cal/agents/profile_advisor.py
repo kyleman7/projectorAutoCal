@@ -42,6 +42,8 @@ def compare_profiles(profile_a: "CalibrationProfile", profile_b: "CalibrationPro
         return "  " + "  ".join(f"{ch}={v}" for ch, v in sorted(gains.items()))
 
     def _fmt_cms(cms: dict) -> str:
+        if not any(cms.values()):
+            return "  (not recorded — CMS is adjusted by hand on the 5040UB)"
         lines = []
         for axis in ["red", "green", "blue", "cyan", "magenta", "yellow"]:
             props = cms.get(axis, {})

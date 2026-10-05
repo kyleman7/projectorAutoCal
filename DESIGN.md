@@ -104,35 +104,36 @@ On `BrokenPipeError` or `ConnectionResetError` during send:
 3. Retry the send once
 4. If retry fails, raise `ProjectorError`
 
-### White Balance tokens (per firmware)
+### White Balance tokens
 
-The 5040UB firmware does not publish its token names. Known candidates:
+From Epson's ESC/VP21 command list (sheet "TW9300", which covers the HC5040UB),
+verified live:
 
-| Channel | Candidates (try in order) |
-|---------|--------------------------|
-| R | `WBALGAINR`, `WBGAINR`, `CRED`, `WBRED`, `BCRED`, `RGAIN` |
-| G | `WBALGAING`, `WBGAING`, `CGRN`, `WBGRN`, `BCGRN`, `GGAIN` |
-| B | `WBALGAINB`, `WBGAINB`, `CBLU`, `WBBLU`, `BCBLU`, `BGAIN` |
+| Channel | Token | Fallback candidates (other firmware) |
+|---------|-------|--------------------------------------|
+| R | `GAINR` | `WBALGAINR`, `WBGAINR`, `CRED`, `WBRED`, `BCRED`, `RGAIN` |
+| G | `GAING` | `WBALGAING`, `WBGAING`, `CGRN`, `WBGRN`, `BCGRN`, `GGAIN` |
+| B | `GAINB` | `WBALGAINB`, `WBGAINB`, `CBLU`, `WBBLU`, `BCBLU`, `BGAIN` |
 
 Gain range: 0–255 (center = 128 = no offset). Only WB.G should be held
-near 128 as the reference; R and B are adjusted relative to G.
+near 128 as the reference; R and B are adjusted relative to G. Stored values
+are quantized to ~2.5-unit steps (≈101-step menu scale), so the engine widens
+small corrections to `wb_gain_min_step` and reads each gain back after writing.
 
-### CMS tokens
+Settings commands only work with **Control4/AMX enabled** in the projector's
+Network menu; otherwise everything but status queries returns `ERR`.
 
-Six axes × three properties = 18 tokens. Pattern: `CMS{axis_initial}{prop_num}`
-or `CMS{axis_initial}{prop_name}`. Examples:
+### Picture mode
 
-| Axis | HUE | SAT | LUM |
-|------|-----|-----|-----|
-| Red | `CMSRHUE` | `CMSRSAT` | `CMSRLUM` |
-| Green | `CMSGHUE` | `CMSGSAT` | `CMSGLUM` |
-| Blue | `CMSBHUE` | `CMSBSAT` | `CMSBLUM` |
-| Cyan | `CMSCHUE` | `CMSCSAT` | `CMSCLUM` |
-| Magenta | `CMSMHUE` | `CMSMSAT` | `CMSMLUM` |
-| Yellow | `CMSYHUE` | `CMSYSAT` | `CMSYLUM` |
+`CMODE` sets the color mode (07 Natural for SDR); `DYNRANGE` sets the HDR mode
+(05 = HDR Mode 4). The command table stores a list of `[command, value]` pairs
+per mode.
 
-CMS values are typically signed integers centered at 0, range ±50 or ±100
-depending on firmware. The engine reads current values before adjusting.
+### CMS
+
+The 5040UB exposes **no** RGBCMY hue/saturation/brightness commands over
+ESC/VP21 — not in Epson's list, and ~900 undocumented guesses all returned
+`ERR`. CMS is therefore a guided manual phase (see Phase 2).
 
 ---
 
@@ -258,37 +259,27 @@ after normalization); adjusting R and B corrects tint without shifting overall
 brightness. The last white reading's Y becomes the reference white that anchors
 relative colorimetry in Phases 2 and 3.
 
-### Phase 2: CMS (6 axes)
+### Phase 2: CMS (6 axes, guided)
 
 Processes axes in `cms_axis_order` (default: red, green, blue, cyan, magenta, yellow).
+The projector can't be driven here, so for each axis the engine displays the
+patch, measures (normalized against the Phase-1 reference white), and — while
+ΔE ≥ threshold — emits a `cms_guidance` event and blocks until the user, having
+adjusted the projector's RGBCMY menu by hand, answers `remeasure` or `next`
+(`POST /api/run/cms-action`). Abort releases the wait.
 
-Error decomposition in Lab ab-plane:
+Error decomposition in Lab ab-plane (`engine.cms_guidance`):
 
 ```
-hue_meas  = atan2(b_meas, a_meas)
-hue_tgt   = atan2(b_tgt,  a_tgt)
-hue_err   = degrees(hue_tgt - hue_meas), normalized to (-180, 180)
-
-chroma_meas = sqrt(a_meas² + b_meas²)
-chroma_tgt  = sqrt(a_tgt²  + b_tgt²)
-sat_ratio   = (chroma_tgt - chroma_meas) / chroma_tgt
-
-lum_err     = (L_tgt - L_meas) / 100
-
-hue_delta = +round(hue_err × step_scale)
-sat_delta = +round(sat_ratio × step_scale × 10)
-lum_delta = +round(lum_err × step_scale × 10)
+hue_err     = degrees(atan2(b_tgt, a_tgt) - atan2(b_meas, a_meas)), normalized to (-180, 180]
+sat_err_pct = (chroma_tgt - chroma_meas) / chroma_tgt × 100
+lum_err     = L_tgt - L_meas
 ```
 
-**Sign convention**: errors are (target − measured), and a positive control
-value is assumed to increase hue angle / saturation / luminance — so each
-delta moves the property *toward* its target. Do not negate the deltas (an
-earlier revision did, which walks *away* from the target); if a projector axis
-turns out inverted, the divergence guard below reverts instead of running away.
-
-The ×10 scaling on sat/lum reflects typical CMS range (±50 or ±100)
-vs typical Hue range (±180 degrees → ±50 units). Each CMS measurement is
-normalized against the Phase-1 reference white before computing Lab.
+Components above 1°, 2 % and 1 L* become instructions, largest (relative to
+those thresholds) first. Hue is phrased as "shift toward <neighbor>" on the Lab
+hue wheel (red → yellow → green → cyan → blue → magenta → red): the menu's own
+Hue +/- direction per axis is unknown, but the neighbor color is unambiguous.
 
 ### Phase 3: Verification
 

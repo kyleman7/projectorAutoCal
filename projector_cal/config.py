@@ -92,6 +92,9 @@ class CalibrationConfig:
     max_iterations_per_patch: int = 20
     wb_gain_center: int = 128
     wb_gain_range: list[int] = field(default_factory=lambda: [0, 255])
+    # Smallest gain change that actually registers: the 5040UB stores gains in
+    # ~2.5-unit steps, so a ±1 write is accepted but reads back unchanged.
+    wb_gain_min_step: int = 3
     proportional_gain_initial: float = 0.8
     proportional_gain_minimum: float = 0.1
     cms_axis_order: list[str] = field(
@@ -108,6 +111,8 @@ class CalibrationConfig:
         lo, hi = self.wb_gain_range
         if lo >= hi:
             raise ConfigError("calibration.wb_gain_range[0] must be < [1]")
+        if self.wb_gain_min_step < 1:
+            raise ConfigError("calibration.wb_gain_min_step must be >= 1")
         if not (0 < self.proportional_gain_initial <= 1.0):
             raise ConfigError("calibration.proportional_gain_initial must be in (0, 1]")
         if not (0 < self.proportional_gain_minimum <= self.proportional_gain_initial):
@@ -244,6 +249,7 @@ def _build_config(data: dict) -> Config:
             max_iterations_per_patch=int(cal_raw.get("max_iterations_per_patch", 20)),
             wb_gain_center=int(cal_raw.get("wb_gain_center", 128)),
             wb_gain_range=list(cal_raw.get("wb_gain_range", [0, 255])),
+            wb_gain_min_step=int(cal_raw.get("wb_gain_min_step", 3)),
             proportional_gain_initial=float(cal_raw.get("proportional_gain_initial", 0.8)),
             proportional_gain_minimum=float(cal_raw.get("proportional_gain_minimum", 0.1)),
             cms_axis_order=list(
