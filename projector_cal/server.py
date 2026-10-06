@@ -323,6 +323,7 @@ async def start_run(body: RunRequest) -> dict:
                     display_index=_state.config.colorimeter.display_index,
                     measurement_retries=_state.config.colorimeter.measurement_retries,
                     measurement_timeout=_state.config.colorimeter.measurement_timeout,
+                    ccss_path=_state.config.colorimeter.ccss_path,
                 )
                 col.start()
                 measure_fn = col.measure
@@ -442,6 +443,7 @@ async def warmup_reading() -> dict:
             display_index=col_cfg.display_index,
             measurement_retries=1,
             measurement_timeout=col_cfg.measurement_timeout,
+            ccss_path=col_cfg.ccss_path,
         )
         with col:
             X, Y, Z = col.measure()

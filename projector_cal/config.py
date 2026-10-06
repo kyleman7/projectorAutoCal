@@ -59,8 +59,13 @@ class ColorimeterConfig:
     display_index: int = 1
     measurement_retries: int = 3
     measurement_timeout: float = 30.0
+    # Spectral correction for the light source (spotread -X): a .ccss
+    # (preferred for the i1 Display Pro) or .ccmx. Empty = uncorrected.
+    ccss_path: str = ""
 
     def __post_init__(self) -> None:
+        if self.ccss_path and not self.ccss_path.lower().endswith((".ccss", ".ccmx")):
+            raise ConfigError("colorimeter.ccss_path must be a .ccss or .ccmx file")
         if not self.spotread_path:
             raise ConfigError("colorimeter.spotread_path is required")
         if self.display_index < 1:
@@ -265,6 +270,7 @@ def _build_config(data: dict) -> Config:
             display_index=int(col_raw.get("display_index", 1)),
             measurement_retries=int(col_raw.get("measurement_retries", 3)),
             measurement_timeout=float(col_raw.get("measurement_timeout", 30.0)),
+            ccss_path=str(col_raw.get("ccss_path", "")),
         )
 
         pgen_raw = data.get("pgen", {})

@@ -13,7 +13,8 @@
     "spotread_path": "spotread",
     "display_index": 1,
     "measurement_retries": 3,
-    "measurement_timeout": 30.0
+    "measurement_timeout": 30.0,
+    "ccss_path": "configs/ccss/epson_tw9400_5050ub_i1pro.ccss"
   },
   "pgen": {
     "host": "192.168.1.101",

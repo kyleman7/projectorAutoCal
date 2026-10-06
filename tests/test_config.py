@@ -203,3 +203,18 @@ class TestLoadCommandTable(object):
 
         probed = {k: v for k, v in table.items() if k != "_note"}
         assert is_command_table_complete(probed) is True
+
+
+class TestColorimeterCorrection:
+    def test_default_points_at_the_bundled_ccss(self):
+        from pathlib import Path
+        cfg = load_config()
+        assert cfg.colorimeter.ccss_path.endswith(".ccss")
+        assert (Path(__file__).parent.parent / cfg.colorimeter.ccss_path).is_file()
+
+    def test_rejects_other_file_types(self):
+        from projector_cal.config import ColorimeterConfig
+        with pytest.raises(ConfigError, match="ccss_path"):
+            ColorimeterConfig(ccss_path="corrections.txt")
+        ColorimeterConfig(ccss_path="")            # blank = uncorrected
+        ColorimeterConfig(ccss_path="x.ccmx")      # matrices are accepted too

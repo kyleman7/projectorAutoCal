@@ -25,6 +25,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -73,9 +74,11 @@ class Colorimeter:
         display_index: int = 1,
         measurement_retries: int = 3,
         measurement_timeout: float = 30.0,
+        ccss_path: str = "",
     ) -> None:
         self.spotread_path = spotread_path
         self.display_index = display_index
+        self.ccss_path = ccss_path
         self.measurement_retries = measurement_retries
         self.measurement_timeout = measurement_timeout
         self._proc: subprocess.Popen | None = None
@@ -85,6 +88,8 @@ class Colorimeter:
         """Spawn spotread with a pseudo-TTY controlling terminal."""
         if self._proc is not None:
             return
+        if self.ccss_path and not Path(self.ccss_path).expanduser().is_file():
+            raise MeasurementError(f"Colorimeter correction file not found: {self.ccss_path}")
 
         master_fd, slave_fd = os.openpty()
 
@@ -104,6 +109,10 @@ class Colorimeter:
             # number would become a log-file name in the working directory
             "-c", str(self.display_index),
         ]
+        if self.ccss_path:
+            # Spectral correction for this light source (lamp 3LCD readings can
+            # be several ΔE off at white without one)
+            cmd += ["-X", str(Path(self.ccss_path).expanduser())]
 
         logger.info("Starting spotread: %s", " ".join(cmd))
         try:
@@ -130,7 +139,12 @@ class Colorimeter:
         self._master_fd = master_fd
 
         # Wait for spotread to print its initialization prompt
-        self._drain_output(timeout=5.0)
+        startup = self._drain_output(timeout=5.0)
+        if proc.poll() is not None:
+            # e.g. instrument busy/missing or a correction file it can't parse
+            self.stop()
+            tail = " ".join(startup.split())[-300:]
+            raise MeasurementError(f"spotread exited during startup (code {proc.returncode}): {tail}")
         logger.debug("spotread started (pid=%d)", proc.pid)
 
     def stop(self) -> None:
@@ -219,6 +233,11 @@ class Colorimeter:
         buf = ""
         while time.monotonic() < deadline:
             chunk = self._read_chunk(timeout=_READ_TIMEOUT)
+            if not chunk and self._proc is not None and self._proc.poll() is not None:
+                raise MeasurementError(
+                    f"spotread exited (code {self._proc.returncode}) while measuring: "
+                    f"{' '.join(buf.split())[-300:]}"
+                )
             if chunk:
                 buf += chunk
                 m = _XYZ_PATTERN.search(buf)

@@ -137,6 +137,7 @@ async function loadConfigIntoFields() {
     document.getElementById('pgen-ip').value      = cfg.pgen.host || '';
     document.getElementById('pgen-port').value    = cfg.pgen.port;
     document.getElementById('spotread-path').value = cfg.colorimeter.spotread_path;
+    document.getElementById('ccss-path').value = cfg.colorimeter.ccss_path || '';
     document.getElementById('serial-baud').value  = cfg.projector.serial_baud;
     if (cfg.projector.transport === 'serial') {
       document.querySelector('input[name="proj-transport"][value="serial"]').checked = true;
@@ -157,7 +158,7 @@ async function saveConfigFromFields() {
         serial_baud: parseInt(v('serial-baud')) || 9600,
       },
       pgen: { host: v('pgen-ip'), port: parseInt(v('pgen-port')) || 85 },
-      colorimeter: { spotread_path: v('spotread-path') || 'spotread' },
+      colorimeter: { spotread_path: v('spotread-path') || 'spotread', ccss_path: v('ccss-path').trim() },
     },
   };
   try {

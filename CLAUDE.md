@@ -24,6 +24,7 @@ D:\projectorAutoCal\
 ├── .gitignore
 ├── configs/
 │   ├── default_config.json        ← all runtime defaults
+│   ├── ccss/                      ← colorimeter spectral corrections (see its README)
 │   └── command_table.json         ← ESC/VP21 token map (populated by --probe)
 ├── profiles/                      ← saved calibration profiles (JSON, gitignored)
 ├── discovery/                     ← last_scan.json cache (gitignored)
@@ -148,6 +149,10 @@ proc = subprocess.Popen(
 os.close(slave_fd)  # parent only needs master
 ```
 
+- `colorimeter.ccss_path` (default: the bundled Epson TW9400/5050UB CCSS) adds `-X <file>` —
+  spectral correction for the lamp; without it the i1 Display Pro can be several ΔE off at white
+- If spotread exits during startup or a measurement (bad -X file, instrument missing), its
+  output is surfaced in a `MeasurementError` immediately instead of a 30 s timeout
 - Trigger measurement: `os.write(master_fd, b"\n")`
 - Parse output: `Result is XYZ: X Y Z` (regex)
 - Take 3 readings per measurement, reject outliers by Y std dev, return mean
@@ -450,7 +455,8 @@ Results cached to `discovery/last_scan.json` (gitignored).
   },
   "colorimeter": {
     "spotread_path": "spotread", "display_index": 1,
-    "measurement_retries": 3, "measurement_timeout": 30.0
+    "measurement_retries": 3, "measurement_timeout": 30.0,
+    "ccss_path": "configs/ccss/epson_tw9400_5050ub_i1pro.ccss"
   },
   "pgen": { "host": "192.168.1.101", "port": 85, "patch_settle_ms": 500,
             "configure_output": true, "sdr_color_format": "rgb", "hdr_color_format": "ycbcr422" },
