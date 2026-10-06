@@ -26,6 +26,7 @@ from pydantic import BaseModel
 from .config import ConfigError, load_command_table, load_config, load_config_from_dict
 from .discovery import NetworkDiscovery
 from .engine import PHASES, CalibrationEngine, CalibrationReport
+from .osd import RgbcmyMenu
 from .pgen import NullPatchDisplay, PGenClient, PGenError, RGBPatch
 from .profiles import (
     CalibrationProfile,
@@ -389,6 +390,7 @@ async def start_run(body: RunRequest) -> dict:
                 on_event=_state.broadcast_event,
                 anomaly_check=anomaly_check,
                 interactive=True,
+                cms_menu=RgbcmyMenu(projector),
             )
             _state._engine = engine
 

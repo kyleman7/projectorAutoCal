@@ -9,9 +9,10 @@ Phases, in run order:
                   alternated until both points hit D65.
   Gamma         — the 9 custom-gamma points (GAMMALV) tuned against a gamma-2.2
                   grey ramp (SDR only).
-  CMS (guided)  — the 5040UB exposes no RGBCMY commands over ESC/VP21, so each
-                  color axis is measured and the user is told which menu control
-                  to move; they adjust by hand, then re-measure or move on.
+  CMS           — the 5040UB exposes no RGBCMY commands over ESC/VP21. In
+                  "auto" mode the engine drives the RGBCMY menu with remote-key
+                  presses (osd.RgbcmyMenu) in a closed loop; in "guided" mode
+                  (or dry runs) it tells the user which control to move.
   Verification  — final measurement pass, no corrections, produces the report.
 
 The engine is hardware-agnostic: it depends on ProjectorClient, a PatchDisplay adapter,
@@ -41,6 +42,7 @@ from .color_math import (
     xyz_to_lab,
 )
 from .config import CalibrationConfig
+from .osd import CONTROLS as _CMS_CONTROLS, RgbcmyMenu
 from .pgen import PatchDisplay, RGBPatch
 from .projector import ProjectorClient, ProjectorError
 
@@ -66,6 +68,15 @@ _HUE_WHEEL = ["red", "yellow", "green", "cyan", "blue", "magenta"]
 _GUIDE_MIN_HUE_DEG = 1.0
 _GUIDE_MIN_SAT_PCT = 2.0
 _GUIDE_MIN_LUM = 1.0
+
+# Automatic CMS (menu steps). Initial guess of how much one Right press moves
+# each error (hue °, chroma %, L*); refined from every move's measured effect,
+# including the sign, so an inverted control is learned rather than assumed.
+_CMS_INITIAL_GAIN = {"HUE": 1.0, "SAT": 1.0, "LUM": 0.5}
+_CMS_NOISE = {"HUE": 0.3, "SAT": 0.5, "LUM": 0.2}     # changes smaller than this are noise
+_CMS_GAIN_BOUNDS = (0.05, 10.0)                       # |error units per step|
+_CMS_MAX_STEP = 8                                     # presses per move
+_CMS_MAX_OFFSET = 30                                  # total travel from the starting value
 
 # Guided levels patterns: (window, background) as SDR 8-bit grey codes;
 # HDR10 sends the same relative luminance PQ-encoded (see _grey_patch)
@@ -112,6 +123,8 @@ class CalibrationReport:
     wb_offset_result: PatchResult | None = None               # offsets, on a dark grey
     gamma_results: list[PatchResult] = field(default_factory=list)
     cms_results: list[PatchResult] = field(default_factory=list)
+    # Automatic CMS: net menu steps moved per axis/control (start values unknown)
+    cms_adjustments: dict[str, dict[str, int]] = field(default_factory=dict)
     verify_results: list[PatchResult] = field(default_factory=list)
     total_iterations: int = 0
     aborted: bool = False
@@ -168,6 +181,9 @@ class CalibrationEngine:
             iteration; its "action" may retry a measurement or abort the patch.
         interactive: If True, guided steps (levels, CMS) wait for the user via
             submit_action(). If False, each guided step is shown/measured once.
+        cms_menu: RGBCMY menu driver. With config.cms_mode == "auto" (and not a
+            dry run) the CMS phase adjusts the projector through it; without
+            one, CMS is guided.
     """
 
     def __init__(
@@ -181,6 +197,7 @@ class CalibrationEngine:
         on_event: EventCallback = _noop_event,
         anomaly_check: Callable[[str, list, list], dict] | None = None,
         interactive: bool = False,
+        cms_menu: RgbcmyMenu | None = None,
     ) -> None:
         self.projector = projector
         self.display = display
@@ -191,6 +208,7 @@ class CalibrationEngine:
         self.on_event = on_event
         self.anomaly_check = anomaly_check
         self.interactive = interactive
+        self.cms_menu = cms_menu
         self._actions: queue.Queue[tuple[str, str | None, int]] = queue.Queue()
         self._abort = False
         self._ref_white_Y: float | None = None
@@ -238,6 +256,11 @@ class CalibrationEngine:
                 report.gamma_results = self._phase_gamma()
             elif phase == "cms":
                 report.cms_results = self._phase2_cms()
+                if self.cms_menu is not None:
+                    report.cms_adjustments = {
+                        axis: {c: n for c, n in moved.items() if n}
+                        for axis, moved in self.cms_menu.offsets.items() if any(moved.values())
+                    }
 
         report.total_iterations = sum(p.iterations for p in report.correction_results)
         if not self._abort:
@@ -694,21 +717,115 @@ class CalibrationEngine:
     # ------------------------------------------------------------------
 
     def _phase2_cms(self) -> list[PatchResult]:
-        """Guided CMS: measure each color axis and tell the user what to adjust."""
+        """CMS for each color axis: automatic through the RGBCMY menu, or guided."""
+        auto = self.config.cms_mode == "auto" and self.cms_menu is not None and not self.dry_run
         self.on_event({"event": "phase_start", "phase": "cms", "patch_count": len(self.config.cms_axis_order)})
-        logger.info("Phase 2: CMS (guided) [mode=%s]", self.mode)
+        logger.info("Phase 2: CMS (%s) [mode=%s]", "automatic" if auto else "guided", self.mode)
         if self._ref_white_Y is None:
             self._measure_white_reference()
         results: list[PatchResult] = []
 
-        for axis in self.config.cms_axis_order:
-            if self._abort:
-                break
-            result = self._cms_axis(axis)
-            results.append(result)
+        try:
+            for axis in self.config.cms_axis_order:
+                if self._abort:
+                    break
+                results.append(self._cms_axis_auto(axis) if auto else self._cms_axis(axis))
+        finally:
+            if auto:
+                self.cms_menu.close()   # never leave the OSD over the picture
 
         self.on_event({"event": "phase_done", "phase": "cms"})
         return results
+
+    def _cms_axis_auto(self, axis: str) -> PatchResult:
+        """Closed-loop Hue/Saturation/Brightness correction for one axis via menu keys.
+
+        Each iteration moves the control with the largest (scaled) error by an
+        estimated number of steps. The per-step effect is re-estimated from
+        every move (secant), so unknown gains and inverted controls are learned.
+        The divergence guard reverts to the best-measured offsets.
+        """
+        cfg = self.config
+        menu = self.cms_menu
+        target_lab = get_target_lab(axis, self.mode)
+        gains = dict(_CMS_INITIAL_GAIN)
+        offsets = {c: 0 for c in _CMS_CONTROLS}
+        best_de, best, worse_streak = float("inf"), dict(offsets), 0
+        initial_de: float | None = None
+        de = float("inf")
+        converged = False
+        iteration = 0
+        X = Y = Z = 0.0
+        last_move: tuple[str, int, float] | None = None
+
+        self.display.display_patch(self._patch(axis))
+        menu.open_axis(axis)
+
+        def move(control: str, steps: int) -> None:
+            before = offsets[control]
+            menu.step(control, steps)
+            offsets[control] += steps
+            self.on_event({"event": "correction", "patch": axis, "axis": f"CMS_{axis}_{control}",
+                           "before": f"{before:+d}", "after": f"{offsets[control]:+d}"})
+
+        for iteration in range(1, cfg.max_iterations_per_patch + 1):
+            if self._abort:
+                break
+            self.on_event({"event": "patch_start", "patch": axis, "iteration": iteration, "mode": "cms"})
+            X, Y, Z = self.measure()
+            meas_lab = xyz_to_lab(*self._to_relative(X, Y, Z))
+            de = delta_e_2000(meas_lab, target_lab)
+            self.on_event({"event": "measurement", "patch": axis, "xyz": [X, Y, Z], "delta_e": de})
+            errs = cms_errors(meas_lab, target_lab)
+            logger.info("CMS %s iter %d: ΔE=%.3f hue=%+.1f° sat=%+.1f%% lum=%+.1f",
+                        axis, iteration, de, errs["HUE"], errs["SAT"], errs["LUM"])
+            if initial_de is None:
+                initial_de = de
+
+            if last_move is not None:
+                control, steps, err_before = last_move
+                observed = err_before - errs[control]
+                if abs(observed) >= _CMS_NOISE[control]:
+                    lo, hi = _CMS_GAIN_BOUNDS
+                    g = observed / steps
+                    gains[control] = math.copysign(min(hi, max(lo, abs(g))), g)
+
+            if de < cfg.delta_e_threshold:
+                converged = True
+                break
+
+            if de < best_de:
+                best_de, best, worse_streak = de, dict(offsets), 0
+            else:
+                worse_streak += 1
+                if worse_streak >= _MAX_WORSENING_ITERATIONS:
+                    logger.warning("CMS %s diverging — reverting to best offsets %s (ΔE=%.3f)",
+                                   axis, best, best_de)
+                    for c in _CMS_CONTROLS:
+                        if best[c] != offsets[c]:
+                            move(c, best[c] - offsets[c])
+                    break
+
+            control = max(_CMS_CONTROLS, key=lambda c: abs(errs[c]) / _CMS_NOISE[c])
+            steps = round(errs[control] / gains[control])
+            if steps == 0:
+                steps = 1 if errs[control] * gains[control] > 0 else -1
+            steps = max(-_CMS_MAX_STEP, min(_CMS_MAX_STEP, steps))
+            # Keep each control within its travel limit from the starting value
+            steps = max(-_CMS_MAX_OFFSET - offsets[control], min(_CMS_MAX_OFFSET - offsets[control], steps))
+            if steps == 0:
+                logger.warning("CMS %s.%s at its travel limit", axis, control)
+                break
+            move(control, steps)
+            last_move = (control, steps, errs[control])
+
+        if not converged and not self._abort:
+            X, Y, Z = self.measure()   # report the projector's actual final state
+            de = delta_e_2000(xyz_to_lab(*self._to_relative(X, Y, Z)), target_lab)
+
+        outcome = _LoopOutcome(final_de=de, initial_de=initial_de, iterations=iteration,
+                               converged=converged, xyz=(X, Y, Z))
+        return self._emit_patch_result(outcome, axis)
 
     def _cms_axis(self, axis: str) -> PatchResult:
         """Measure one axis; until it converges, emit guidance and wait for the user.
@@ -905,6 +1022,27 @@ def _gain_delta(err: float, step_scale: float, gain_range: int, min_step: int) -
     return delta
 
 
+def cms_errors(
+    meas_lab: tuple[float, float, float],
+    target_lab: tuple[float, float, float],
+) -> dict[str, float]:
+    """Decompose a colour error into the RGBCMY menu's three controls.
+
+    All signed (target − measured), so positive means "press Right":
+    HUE in degrees of Lab hue angle (Right moves toward the next colour on
+    the hue wheel), SAT in % of target chroma, LUM in L*.
+    """
+    L_meas, a_meas, b_meas = meas_lab
+    L_tgt, a_tgt, b_tgt = target_lab
+    hue_err = math.degrees(math.atan2(b_tgt, a_tgt) - math.atan2(b_meas, a_meas))
+    chroma_tgt = math.hypot(a_tgt, b_tgt)
+    return {
+        "HUE": (hue_err + 180) % 360 - 180,
+        "SAT": (chroma_tgt - math.hypot(a_meas, b_meas)) / max(chroma_tgt, 1e-6) * 100,
+        "LUM": L_tgt - L_meas,
+    }
+
+
 def cms_guidance(
     axis: str,
     meas_lab: tuple[float, float, float],
@@ -917,15 +1055,8 @@ def cms_guidance(
     Hue is described as a shift toward a neighboring color rather than +/-,
     because the projector's hue direction per axis is not known.
     """
-    L_meas, a_meas, b_meas = meas_lab
-    L_tgt, a_tgt, b_tgt = target_lab
-
-    # (target − measured), normalized to (-180, 180]
-    hue_err = math.degrees(math.atan2(b_tgt, a_tgt) - math.atan2(b_meas, a_meas))
-    hue_err = (hue_err + 180) % 360 - 180
-    chroma_tgt = math.hypot(a_tgt, b_tgt)
-    sat_err_pct = (chroma_tgt - math.hypot(a_meas, b_meas)) / max(chroma_tgt, 1e-6) * 100
-    lum_err = L_tgt - L_meas
+    errs = cms_errors(meas_lab, target_lab)
+    hue_err, sat_err_pct, lum_err = errs["HUE"], errs["SAT"], errs["LUM"]
 
     items: list[tuple[float, dict]] = []
     if abs(hue_err) >= _GUIDE_MIN_HUE_DEG:
@@ -990,5 +1121,6 @@ def _report_to_dict(report: CalibrationReport) -> dict:
         "wb_offset_result": _patch_dict(report.wb_offset_result),
         "gamma_results": [_patch_dict(p) for p in report.gamma_results],
         "cms_results": [_patch_dict(p) for p in report.cms_results],
+        "cms_adjustments": report.cms_adjustments,
         "verify_results": [_patch_dict(p) for p in report.verify_results],
     }

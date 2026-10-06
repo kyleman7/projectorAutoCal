@@ -38,7 +38,7 @@ The colorimeter connects to the host machine via USB. It mounts on a **tripod ai
 1. **Brightness / Contrast (guided)** — test patterns on screen; step the projector's black and white level from the browser until the pattern looks right
 2. **White Balance (two-point)** — adjusts R/G/B gains on white and R/G/B offsets on a dark grey until both sit on the D65 white point
 3. **Gamma (SDR)** — tunes the projector's 9 custom-gamma points so a 10–90% grey ramp tracks gamma 2.2
-4. **CMS (6-axis, guided)** — measures red, green, blue, cyan, magenta, and yellow and tells you which Hue / Saturation / Brightness control to change in the projector's RGBCMY menu (the 5040UB has no network commands for CMS), re-measuring after each adjustment
+4. **CMS (6-axis, automatic)** — measures red, green, blue, cyan, magenta, and yellow and adjusts Hue / Saturation / Brightness in the projector's RGBCMY menu by sending remote-control key presses over the network (the 5040UB has no direct CMS commands), re-measuring after each move. A guided mode that tells you what to change by hand is available as a fallback
 5. **Verification** — final measurement pass over white, the six colors, and a 10–90% grey ramp, with no corrections applied
 
 Turn **Auto Iris** off in the projector's Image menu before calibrating — it can't be controlled over the network and changes light output between patches.

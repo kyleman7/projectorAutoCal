@@ -353,7 +353,7 @@
               <option value="levels">Brightness / Contrast only (guided)</option>
               <option value="wb">White Balance only (two-point)</option>
               <option value="gamma">Gamma only (SDR)</option>
-              <option value="cms">CMS only (guided)</option>
+              <option value="cms">CMS only</option>
             </select>
           </div>
           <div class="field" style="flex:1; margin:0">
@@ -374,10 +374,11 @@
           Every run first records all picture settings and resets Color, Tint, Skin tone and
           image processing to neutral. <em>All</em> then runs: guided brightness/contrast on test
           patterns → automatic two-point white balance (gains on white, offsets on 30% grey) →
-          automatic gamma (the 9 custom-gamma points, SDR only) → guided color correction (CMS) →
-          a verification pass over white, the colors and a 10–90% grey ramp. The 5040UB can't adjust
-          CMS over the network, so for each color the app tells you what to change in the RGBCMY
-          menu and waits. <strong>Turn Auto Iris off</strong> in the projector's Image menu first. The projector stores SDR and HDR10 settings separately,
+          automatic gamma (the custom-gamma points, SDR only) → automatic color correction (CMS) →
+          a verification pass over white, the colors and a 10–90% grey ramp. The 5040UB has no CMS
+          network commands, so the app drives its RGBCMY menu with remote-control key presses (you'll
+          see the menu on screen — leave the remote alone while it runs). Dry runs, or
+          <code>cms_mode: "guided"</code>, instead tell you what to change and wait. <strong>Turn Auto Iris off</strong> in the projector's Image menu first. The projector stores SDR and HDR10 settings separately,
           so calibrate each mode in its own session.
         </div>
 

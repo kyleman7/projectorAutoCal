@@ -44,6 +44,7 @@ D:\projectorAutoCal\
 │   ├── pgen.py                    ← PGenerator TCP adapter + NullPatchDisplay
 │   ├── engine.py                  ← calibration phases (baseline, levels, WB, gamma, CMS, verify)
 │   ├── picture.py                 ← picture-setting registry: snapshot/restore/neutralize/nudge
+│   ├── osd.py                     ← RGBCMY menu driver (remote-key presses) for automatic CMS
 │   ├── profiles.py                ← save/load/apply/list/delete profiles (full settings snapshot)
 │   ├── discovery.py               ← mDNS + parallel port scan
 │   ├── server.py                  ← FastAPI app, REST + WebSocket
@@ -311,8 +312,25 @@ Gamma (SDR only; skipped with a warning in HDR10, where the projector tone-maps 
   the target; `delta = +round((L_t − L_m)/100 × step_scale × 255)`, min step applies;
   higher GAMMALV brightens (verified)
 
-Phase 2 — CMS, guided (6 axes: red, green, blue, cyan, magenta, yellow):
-- The 5040UB has no CMS commands, so the user adjusts the RGBCMY menu by hand
+Phase 2 — CMS (6 axes: red, green, blue, cyan, magenta, yellow). The 5040UB has no CMS
+commands, so `calibration.cms_mode` picks how:
+
+Automatic (`"auto"`, default; needs `cms_menu`, never in dry runs):
+- `osd.RgbcmyMenu` drives the menu with `KEY xx` presses, mapped with a webcam:
+  Esc×3 (close anything) → `KEY 89` opens the RGBCMY grid with the cursor ALWAYS on R →
+  Down×row → Enter opens the colour panel (Hue selected) → Up/Down picks Hue/Saturation/
+  Brightness → Right/Left = ±1 menu step → Esc×3 closes. Right on Hue = toward the next
+  colour on the hue wheel (the slider is labelled, e.g. red M◀▶Y)
+- The open panel doesn't change readings at screen centre, so the loop measures with it open
+- Loop per axis: measure → `cms_errors` (hue °, chroma %, L*) → move the control with the
+  largest error/noise ratio by `round(err / gain)` steps (≤ 8, ≤ ±30 total) → re-measure.
+  Each control's gain (error per step, signed) is re-estimated from every move above the
+  noise floor, so unknown sensitivities and inverted controls are learned. Divergence guard
+  reverts to the best offsets. The menu is always closed afterwards (also on abort)
+- Values can't be read back: `RgbcmyMenu.offsets` / `report.cms_adjustments` record net steps
+- Verified live: red ΔE 3.11 → 0.95 in 7 readings (~3 min); step counts exact (webcam-checked)
+
+Guided (`"guided"`, dry runs, or no menu driver):
 - Display each patch, measure; if ΔE ≥ threshold emit `cms_guidance` and block until
   the user answers via `POST /api/run/action` (`remeasure` or `next`); abort releases the wait
 - Guidance (`engine.cms_guidance`), largest error first: hue as "shift toward <neighbor>"
@@ -475,7 +493,7 @@ Results cached to `discovery/last_scan.json` (gitignored).
     "proportional_gain_initial": 0.8, "proportional_gain_minimum": 0.1,
     "cms_axis_order": ["red","green","blue","cyan","magenta","yellow"],
     "wb_offset_patch": "grey30", "wb_two_point_rounds": 3,
-    "gamma_points": [[10,1],[20,3],[30,4],[40,5],[50,6],[80,7]], "gamma_passes": 2,
+    "gamma_points": [[10,1],[20,3],[30,4],[40,5],[50,6],[80,7]], "gamma_passes": 2, "cms_mode": "auto",
     "apply_baseline_neutral": true,
     "hdr_white_nits": 100
   },
@@ -523,7 +541,7 @@ Results cached to `discovery/last_scan.json` (gitignored).
 
 16. **Dry run = no projector writes, but patches still display**: a dry run drives PGenerator (falling back to NullPatchDisplay with a `warning` only if the Pi is unreachable) so readings mean something. **Dummy measurements are dry-run only**: `server.py` refuses a real (non-dry) run when the colorimeter module is unavailable. Driving corrections from random readings would walk the projector's settings randomly.
 
-17. **CMS is not automatable on the 5040UB**: there are no RGBCMY commands over ESC/VP21 (checked against Epson's list and ~900 undocumented guesses). Phase 2 is guided manual adjustment; profiles store `cms_values: {}`, and `apply_profile` only logs old CMS values. Don't reintroduce `get_cms`/`set_cms`.
+17. **No RGBCMY commands over ESC/VP21** (checked against Epson's list and ~900 undocumented guesses). Automatic CMS goes through the OSD with `KEY` presses (`osd.py`); values can't be read back, so profiles store `cms_values: {}` and `apply_profile` only logs old CMS values. Don't reintroduce `get_cms`/`set_cms`. The user must not touch the remote during an automatic CMS phase — a stray key desynchronizes the menu cursor (each axis re-homes, which limits the damage).
 
 18. **Gain writes are quantized** (~2.5 units): ±1 writes are accepted but change nothing. Keep `wb_gain_min_step` and the read-back after `set_wb_gain`.
 

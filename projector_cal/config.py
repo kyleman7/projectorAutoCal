@@ -128,6 +128,9 @@ class CalibrationConfig:
         default_factory=lambda: [[10, 1], [20, 3], [30, 4], [40, 5], [50, 6], [80, 7]]
     )
     gamma_passes: int = 2
+    # CMS: "auto" drives the RGBCMY menu with remote-key presses; "guided"
+    # tells the user what to change (dry runs are always guided)
+    cms_mode: str = "auto"
     # Reset color/tint/skin tone and processing to neutral at the start of a run
     apply_baseline_neutral: bool = True
     # HDR10 patches: luminance (cd/m²) of the "white" stimulus; every other
@@ -164,6 +167,8 @@ class CalibrationConfig:
                 or len({g for g, _ in pairs}) != len(pairs) or len({t for _, t in pairs}) != len(pairs)):
             raise ConfigError("calibration.gamma_points must be [grey 10–90 (step 10), tone 0–8] pairs, "
                               "each grey and tone used once")
+        if self.cms_mode not in ("auto", "guided"):
+            raise ConfigError("calibration.cms_mode must be auto or guided")
         if self.gamma_passes < 1:
             raise ConfigError("calibration.gamma_passes must be >= 1")
         valid_axes = {"red", "green", "blue", "cyan", "magenta", "yellow"}
@@ -311,6 +316,7 @@ def _build_config(data: dict) -> Config:
             gamma_points=[[int(g), int(t)] for g, t in cal_raw.get(
                 "gamma_points", [[10, 1], [20, 3], [30, 4], [40, 5], [50, 6], [80, 7]])],
             gamma_passes=int(cal_raw.get("gamma_passes", 2)),
+            cms_mode=str(cal_raw.get("cms_mode", "auto")),
             apply_baseline_neutral=bool(cal_raw.get("apply_baseline_neutral", True)),
             hdr_white_nits=float(cal_raw.get("hdr_white_nits", 100.0)),
         )

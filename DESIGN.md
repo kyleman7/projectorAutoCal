@@ -307,14 +307,27 @@ repeated (`gamma_passes`, default 2) until a pass needs no correction; greys
 without a tone of their own (60, 70, 90 %) are only verified. Skipped in HDR10,
 where the projector tone-maps PQ.
 
-### Phase 2: CMS (6 axes, guided)
+### Phase 2: CMS (6 axes)
 
 Processes axes in `cms_axis_order` (default: red, green, blue, cyan, magenta, yellow).
-The projector can't be driven here, so for each axis the engine displays the
+
+**Automatic** (`cms_mode: "auto"`, default): `osd.RgbcmyMenu` drives the RGBCMY
+menu with remote-key presses (`KEY 89` opens it with the cursor always on R, so
+every axis starts from a known state; Enter, Up/Down, Left/Right ±1, Esc). Per
+axis the engine measures, splits the error into hue °, chroma % and L*
+(`cms_errors`), moves the control with the largest error-to-noise ratio by
+`round(error / gain)` steps, and re-estimates that control's signed gain from
+the measured effect — so it needs no prior knowledge of the menu's sensitivity
+or direction. The divergence guard reverts to the best offsets; the menu is
+always closed afterwards. Menu values can't be read back, so net steps per
+control are reported (`cms_adjustments`).
+
+**Guided** (`cms_mode: "guided"`, and always in dry runs):
+For each axis the engine displays the
 patch, measures (normalized against the Phase-1 reference white), and — while
 ΔE ≥ threshold — emits a `cms_guidance` event and blocks until the user, having
 adjusted the projector's RGBCMY menu by hand, answers `remeasure` or `next`
-(`POST /api/run/cms-action`). Abort releases the wait.
+(`POST /api/run/action`). Abort releases the wait.
 
 Error decomposition in Lab ab-plane (`engine.cms_guidance`):
 

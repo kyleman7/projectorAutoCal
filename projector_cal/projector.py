@@ -501,6 +501,10 @@ class ProjectorClient:
         self._send_command(token, str(value) if param is None else f"{param} {value}")
         logger.info("%s%s → %s", token, f" {param}" if param else "", value)
 
+    def press_key(self, code: str) -> None:
+        """Send a remote-control key (``KEY xx``, hex code from Epson's key table)."""
+        self._send_command("KEY", code)
+
     def get_power_status(self) -> str:
         """Query PWR? — answered by every ESC/VP21 projector, even in standby.
 

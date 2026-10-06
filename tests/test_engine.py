@@ -729,3 +729,89 @@ class TestHdrPatches:
         )
         assert engine._patch("grey50") == RGBPatch(128, 128, 128)
         assert engine._grey_patch(5) == RGBPatch(5, 5, 5)
+
+
+class FakeMenu:
+    """RgbcmyMenu stand-in that edits FakeProjector.cms like the real panel.
+
+    `invert` lists controls whose Right press moves the value the other way.
+    """
+
+    def __init__(self, proj: FakeProjector, invert=()):
+        self.proj = proj
+        self.invert = set(invert)
+        self.axis = None
+        self.open_count = 0
+        self.closed = True
+        self.offsets = {a: {"HUE": 0, "SAT": 0, "LUM": 0} for a in _CMS_AXES}
+
+    def open_axis(self, axis):
+        self.axis, self.closed = axis, False
+        self.open_count += 1
+
+    def step(self, control, steps):
+        sign = -1 if control in self.invert else 1
+        self.proj.cms[self.axis][control] += sign * steps
+        self.offsets[self.axis][control] += steps
+
+    def close(self):
+        self.closed = True
+
+
+class TestAutoCMS:
+    def _engine(self, proj, menu, **kw):
+        engine = CalibrationEngine(
+            projector=proj, display=FakeDisplay(), measure=cms_measure(proj, "red"),
+            config=make_config(), cms_menu=menu, **kw,
+        )
+        engine._ref_white_Y = 60.0
+        return engine
+
+    def test_converges_and_closes_the_menu(self):
+        proj = FakeProjector()
+        menu = FakeMenu(proj)
+        report = self._engine(proj, menu).run(["cms"])
+        red = report.cms_results[0]
+        assert red.converged, f"ΔE {red.final_delta_e}"
+        assert red.final_delta_e < red.initial_delta_e
+        assert menu.closed
+        assert report.cms_adjustments["red"]   # net steps recorded for the profile
+
+    def test_learns_an_inverted_control(self):
+        proj = FakeProjector()
+        menu = FakeMenu(proj, invert={"HUE"})
+        result = self._engine(proj, menu)._phase2_cms()[0]
+        assert result.converged, f"ΔE {result.final_delta_e}"
+        assert proj.cms["red"]["HUE"] == 5   # reached the true hue despite the inversion
+
+    def test_dry_run_is_guided_and_presses_nothing(self):
+        proj = FakeProjector()
+        menu = FakeMenu(proj)
+        self._engine(proj, menu, dry_run=True)._phase2_cms()
+        assert menu.open_count == 0
+        assert proj.cms["red"] == {"HUE": 0, "SAT": 0, "LUM": 0}
+
+    def test_guided_mode_ignores_the_menu(self):
+        proj = FakeProjector()
+        menu = FakeMenu(proj)
+        engine = self._engine(proj, menu)
+        engine.config.cms_mode = "guided"
+        engine._phase2_cms()
+        assert menu.open_count == 0
+
+    def test_abort_still_closes_the_menu(self):
+        proj = FakeProjector()
+        menu = FakeMenu(proj)
+        engine = self._engine(proj, menu)
+        calls = {"n": 0}
+        base = engine.measure
+
+        def measure_then_abort():
+            calls["n"] += 1
+            if calls["n"] == 2:
+                engine.abort()
+            return base()
+
+        engine.measure = measure_then_abort
+        engine._phase2_cms()
+        assert menu.closed
