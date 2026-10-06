@@ -10,10 +10,16 @@ each terminated by b"\\x02\\r"; every command gets a reply with the same termina
   CMD:GET_MODE                     → "OK:0[3840x2160 30.00Hz ...]"
   CMD:GET_PGENERATOR_CONF_RGB_QUANT_RANGE → "OK:1" (1 = limited 16–235, 2 = full)
   RGB=RECTANGLE;w,h;0;r,g,b;bg_r,bg_b,bg_g;0,0,x,y;-1   (8-bit; note the bg order)
+  RGB=RECTANGLE10bit;…                                   (same, 10-bit codes)
+  CMD:SET_PGENERATOR_CONF_<NAME>:<value> → "OK:"         (output settings)
+  RESTARTPGENERATOR:                                     (apply output settings)
   QUIT
 
-Patches are given in full-range 8-bit (0–255) and scaled to 16–235 when the Pi
-outputs limited range, so "white" is always peak white. They fill the screen.
+Patches carry full-range codes at 8 or 10 bits and are mapped to the Pi's output
+depth and range (limited = 16–235 / 64–940), so "white" is always peak white.
+
+configure_output() puts the Pi in the SDR or HDR10 signal mode a run needs and
+restarts PGenerator only when something changed.
 
 Connection is established at context entry and kept open for the session. A single
 reconnect is attempted on broken-pipe before raising PGenError.
@@ -22,15 +28,31 @@ reconnect is attempted on broken-pipe before raising PGenError.
 from __future__ import annotations
 
 import logging
+import re
 import socket
 import time
 from dataclasses import dataclass
-import re
-from typing import Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 
 logger = logging.getLogger(__name__)
 
 _CMD_END = b"\x02\r"
+
+# PGenerator output settings (CMD:GET/SET_PGENERATOR_CONF_<name>) per signal mode.
+# Values follow quietvoid/pgen_client: colorimetry 2 = BT.709, 9 = BT.2020;
+# EOTF 0 = SDR gamma, 2 = PQ; primaries 2 = P3-D65. HDR10 needs 10-bit for PQ.
+# HDR metadata (mastering/MaxCLL/MaxFALL) is left as configured on the Pi.
+_OUTPUT_PRESETS: dict[str, dict[str, str]] = {
+    "sdr": {
+        "IS_SDR": "1", "IS_HDR": "0", "IS_LL_DOVI": "0", "IS_STD_DOVI": "0", "DV_STATUS": "0",
+        "COLORIMETRY": "2", "MAX_BPC": "8", "EOTF": "0",
+    },
+    "hdr10": {
+        "IS_SDR": "0", "IS_HDR": "1", "IS_LL_DOVI": "0", "IS_STD_DOVI": "0", "DV_STATUS": "0",
+        "COLORIMETRY": "9", "MAX_BPC": "10", "EOTF": "2", "PRIMARIES": "2",
+    },
+}
+COLOR_FORMATS = {"rgb": "0", "ycbcr444": "1", "ycbcr422": "2"}
 
 
 class PGenError(Exception):
@@ -39,15 +61,19 @@ class PGenError(Exception):
 
 @dataclass(frozen=True)
 class RGBPatch:
-    """An 8-bit RGB color patch to display on screen."""
+    """A full-range RGB color patch (8-bit 0–255, or 10-bit 0–1023 for HDR)."""
     r: int
     g: int
     b: int
+    bits: int = 8
 
     def __post_init__(self) -> None:
+        if self.bits not in (8, 10):
+            raise ValueError(f"RGBPatch.bits must be 8 or 10, got {self.bits}")
+        top = (1 << self.bits) - 1
         for name, val in (("r", self.r), ("g", self.g), ("b", self.b)):
-            if not (0 <= val <= 255):
-                raise ValueError(f"RGBPatch.{name} must be 0–255, got {val}")
+            if not (0 <= val <= top):
+                raise ValueError(f"RGBPatch.{name} must be 0–{top}, got {val}")
 
 
 @runtime_checkable
@@ -94,15 +120,19 @@ class PGenClient:
         patch_settle_ms: int = 500,
         connection_timeout: float = 5.0,
         command_timeout: float = 10.0,
+        restart_timeout: float = 30.0,
     ) -> None:
         self.host = host
         self.port = port
         self.patch_settle_ms = patch_settle_ms
         self.connection_timeout = connection_timeout
         self.command_timeout = command_timeout
+        self.restart_timeout = restart_timeout
         self._sock: socket.socket | None = None
         self._size: tuple[int, int] = (1920, 1080)
         self._limited_range = False
+        self._bits = 8
+        self._format = COLOR_FORMATS["rgb"]
 
     # ------------------------------------------------------------------
     # Connection lifecycle
@@ -126,18 +156,38 @@ class PGenClient:
             alive = self._command("IS_ALIVE")
             if alive != "ALIVE":
                 raise PGenError(f"{self.host}:{self.port} is not PGenerator (IS_ALIVE → {alive!r})")
-            mode = self._query("GET_MODE")
-            m = re.search(r"(\d+)x(\d+)", mode)
-            if m:
-                self._size = (int(m.group(1)), int(m.group(2)))
-            else:
-                logger.warning("Unrecognized PGenerator mode %r — assuming %dx%d", mode, *self._size)
-            self._limited_range = self._query("GET_PGENERATOR_CONF_RGB_QUANT_RANGE") == "1"
+            self._read_output()
         except Exception:
             self._close()
             raise
-        logger.info("Connected to PGenerator at %s:%d (%dx%d, %s range)", self.host, self.port,
-                    *self._size, "limited" if self._limited_range else "full")
+        logger.info("Connected to PGenerator at %s:%d (%dx%d, %d-bit, %s range)", self.host, self.port,
+                    *self._size, self._bits, "limited" if self._limited_range else "full")
+
+    def configure_output(self, mode: Literal["sdr", "hdr10"], color_format: str) -> dict[str, str]:
+        """Put the Pi's HDMI output in the signal mode a run needs.
+
+        Only settings that differ are written, and PGenerator is restarted
+        (which is what applies them) only when something changed.
+
+        Returns:
+            The settings that were changed (empty when already configured).
+        """
+        if color_format not in COLOR_FORMATS:
+            raise ValueError(f"color_format must be one of {sorted(COLOR_FORMATS)}")
+        wanted = {**_OUTPUT_PRESETS[mode], "COLOR_FORMAT": COLOR_FORMATS[color_format]}
+        changed = {
+            name: value for name, value in wanted.items()
+            if self._query(f"GET_PGENERATOR_CONF_{name}") != value
+        }
+        if not changed:
+            return {}
+        for name, value in changed.items():
+            reply = self._command(f"CMD:SET_PGENERATOR_CONF_{name}:{value}")
+            if not reply.startswith("OK"):
+                raise PGenError(f"PGenerator rejected {name}={value}: {reply!r}")
+        logger.info("PGenerator output → %s (%s); restarting PGenerator", mode, changed)
+        self._restart()
+        return changed
 
     def disconnect(self) -> None:
         """Blank the screen and close the TCP connection."""
@@ -193,6 +243,41 @@ class PGenClient:
     # Internal
     # ------------------------------------------------------------------
 
+    def _read_output(self) -> None:
+        """Read resolution, range, bit depth and color format from the Pi."""
+        mode = self._query("GET_MODE")
+        m = re.search(r"(\d+)x(\d+)", mode)
+        if m:
+            self._size = (int(m.group(1)), int(m.group(2)))
+        else:
+            logger.warning("Unrecognized PGenerator mode %r — assuming %dx%d", mode, *self._size)
+        self._limited_range = self._query("GET_PGENERATOR_CONF_RGB_QUANT_RANGE") == "1"
+        self._bits = 10 if self._query("GET_PGENERATOR_CONF_MAX_BPC") == "10" else 8
+        self._format = self._query("GET_PGENERATOR_CONF_COLOR_FORMAT")
+
+    def _restart(self) -> None:
+        """Restart the PGenerator software and wait until it is running again."""
+        old_pid = self._query("GET_PGENERATOR_IS_EXECUTED")
+        try:
+            self._command("RESTARTPGENERATOR:")
+        except (PGenError, OSError):
+            self._close()  # the daemon may drop the connection while restarting
+        deadline = time.monotonic() + self.restart_timeout
+        while time.monotonic() < deadline:
+            time.sleep(1.0)
+            try:
+                if self._sock is None:
+                    self.connect()
+                pid = self._query("GET_PGENERATOR_IS_EXECUTED")
+            except (PGenError, OSError):
+                self._close()
+                continue
+            if pid != old_pid and "Pid" in pid:
+                self._read_output()
+                time.sleep(2.0)  # let the HDMI sink re-lock to the new signal
+                return
+        raise PGenError(f"PGenerator did not come back within {self.restart_timeout:.0f}s of a restart")
+
     def _close(self) -> None:
         if self._sock is not None:
             try:
@@ -224,9 +309,13 @@ class PGenClient:
             raise PGenError(f"PGenerator rejected CMD:{name}: {reply!r}")
         return reply[3:]
 
-    def _code(self, v: int) -> int:
-        """Map a full-range 8-bit value to the Pi's output range."""
-        return 16 + round(v * 219 / 255) if self._limited_range else v
+    def _code(self, v: int, src_bits: int = 8) -> int:
+        """Map a full-range code at `src_bits` to the Pi's output depth and range."""
+        out = self._bits - 8
+        x = v / ((1 << src_bits) - 1)
+        if self._limited_range:
+            return (16 << out) + round(x * (219 << out))
+        return round(x * ((1 << self._bits) - 1))
 
     def _send_patch(
         self,
@@ -236,15 +325,19 @@ class PGenClient:
         position: tuple[int, int] = (0, 0),
     ) -> None:
         """Send a rectangle (full-screen by default); reconnect once on a dropped connection."""
-        r, g, b = self._code(patch.r), self._code(patch.g), self._code(patch.b)
+        r, g, b = (self._code(c, patch.bits) for c in (patch.r, patch.g, patch.b))
         # Full-field default: background matches the patch so any sizing
         # mismatch is still a uniform field
         bg = background or patch
-        br, bg_g, bb = self._code(bg.r), self._code(bg.g), self._code(bg.b)
+        br, bg_g, bb = (self._code(c, bg.bits) for c in (bg.r, bg.g, bg.b))
+        if self._bits == 10 and self._format != COLOR_FORMATS["rgb"]:
+            # PGenerator takes 10-bit backgrounds only in RGB; 8-bit otherwise
+            br, bg_g, bb = (round(c / 4) for c in (br, bg_g, bb))
         w, h = size or self._size
         x, y = position
+        rect = "RECTANGLE" if self._bits == 8 else "RECTANGLE10bit"
         # PGenerator takes the background as r,b,g
-        cmd = f"RGB=RECTANGLE;{w},{h};0;{r},{g},{b};{br},{bb},{bg_g};0,0,{x},{y};-1"
+        cmd = f"RGB={rect};{w},{h};0;{r},{g},{b};{br},{bb},{bg_g};0,0,{x},{y};-1"
         for attempt in range(2):
             try:
                 self._command(cmd)

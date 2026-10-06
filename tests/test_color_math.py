@@ -222,3 +222,30 @@ class TestPatchRgb:
     def test_unknown_raises(self):
         with pytest.raises(KeyError, match="Unknown patch"):
             patch_rgb("ultraviolet")
+
+
+class TestHdrSignals:
+    def test_pq_reference_points(self):
+        from projector_cal.color_math import pq_encode
+        assert pq_encode(10000) == pytest.approx(1.0)
+        assert pq_encode(100) == pytest.approx(0.5081, abs=1e-4)   # ST 2084 table value
+        assert pq_encode(0) < 1e-5
+
+    def test_white_is_neutral_at_the_stimulus_level(self):
+        from projector_cal.color_math import hdr_patch_code10, pq_code10
+        r, g, b = hdr_patch_code10("white", 100)
+        assert r == g == b == pq_code10(100) == 520
+
+    def test_p3_colours_fit_the_bt2020_container(self):
+        from projector_cal.color_math import hdr_patch_code10
+        for name in ("red", "green", "blue", "cyan", "magenta", "yellow"):
+            codes = hdr_patch_code10(name, 100)
+            assert all(0 <= c <= 1023 for c in codes), (name, codes)
+        r, g, b = hdr_patch_code10("red", 100)
+        assert r > g > b   # P3 red is inside BT.2020, so it needs some green
+
+    def test_greys_track_relative_luminance(self):
+        from projector_cal.color_math import get_target_xyY, hdr_patch_code10, pq_code10
+        Y = get_target_xyY("grey50", "hdr10")[2]
+        r, g, b = hdr_patch_code10("grey50", 100)
+        assert r == g == b == pq_code10(Y)   # Y is relative to white = 100 nits

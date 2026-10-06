@@ -337,6 +337,13 @@ async def start_run(body: RunRequest) -> dict:
                 measure_fn = _dummy_measure
 
             display.connect()
+            if isinstance(display, PGenClient) and pgen_cfg.configure_output:
+                # The Pi's HDMI signal must match the run: SDR BT.709 8-bit, or
+                # HDR10 (PQ, BT.2020, 10-bit). Restarts PGenerator if it changes.
+                fmt = pgen_cfg.hdr_color_format if body.mode == "hdr10" else pgen_cfg.sdr_color_format
+                changed = display.configure_output(body.mode, fmt)
+                _state.broadcast_event({"event": "pgen_output", "mode": body.mode,
+                                        "color_format": fmt, "changed": changed})
 
             anomaly_check = None
             if _state.ai_enabled:

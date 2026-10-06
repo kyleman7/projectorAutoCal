@@ -18,7 +18,10 @@
   "pgen": {
     "host": "192.168.1.101",
     "port": 85,
-    "patch_settle_ms": 500
+    "patch_settle_ms": 500,
+    "configure_output": true,
+    "sdr_color_format": "rgb",
+    "hdr_color_format": "ycbcr422"
   },
   "calibration": {
     "delta_e_threshold": 1.0,
@@ -32,7 +35,8 @@
     "wb_offset_patch": "grey30",
     "wb_two_point_rounds": 3,
     "gamma_tone_levels": [10, 20, 30, 40, 50, 60, 70, 80, 90],
-    "apply_baseline_neutral": true
+    "apply_baseline_neutral": true,
+    "hdr_white_nits": 100
   },
   "hdr": {
     "picture_mode_command": "PMOD",

@@ -27,6 +27,7 @@ from projector_cal.engine import (
     _gain_delta,
     cms_guidance,
 )
+from projector_cal.pgen import RGBPatch
 from projector_cal.projector import ProjectorError
 
 from colormath.color_conversions import convert_color
@@ -667,3 +668,32 @@ class TestGamma:
         )
         assert engine._phase_gamma() == []
         assert proj.set_calls == 0
+
+
+class TestHdrPatches:
+    def test_hdr10_runs_send_10_bit_pq_patches(self):
+        from projector_cal.color_math import hdr_patch_code10
+        shown = []
+
+        class RecordingDisplay(FakeDisplay):
+            def display_patch(self, patch):
+                shown.append(patch)
+                super().display_patch(patch)
+
+        proj = FakeProjector()
+        engine = CalibrationEngine(
+            projector=proj, display=RecordingDisplay(), measure=wb_measure(proj),
+            config=make_config(), mode="hdr10",
+        )
+        engine._phase3_verify()
+        white = shown[0]
+        assert white.bits == 10 and (white.r, white.g, white.b) == hdr_patch_code10("white", 100)
+
+    def test_sdr_runs_send_8_bit_codes(self):
+        proj = FakeProjector()
+        display = FakeDisplay()
+        engine = CalibrationEngine(
+            projector=proj, display=display, measure=wb_measure(proj), config=make_config(),
+        )
+        assert engine._patch("grey50") == RGBPatch(128, 128, 128)
+        assert engine._grey_patch(5) == RGBPatch(5, 5, 5)

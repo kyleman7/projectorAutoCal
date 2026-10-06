@@ -163,13 +163,35 @@ a reply with the same terminator (the protocol quietvoid/pgen_client speaks):
 | `IS_ALIVE` | `ALIVE` |
 | `CMD:GET_MODE` | `OK:0[3840x2160 30.00Hz ...]` |
 | `CMD:GET_PGENERATOR_CONF_RGB_QUANT_RANGE` | `OK:1` (1 = limited 16–235, 2 = full) |
+| `CMD:GET_PGENERATOR_CONF_MAX_BPC` / `_COLOR_FORMAT` | `OK:8` / `OK:0` (0 RGB, 1 YCbCr 4:4:4, 2 4:2:2) |
+| `CMD:SET_PGENERATOR_CONF_<NAME>:<value>` | `OK:` (IS_SDR, IS_HDR, COLORIMETRY 2=BT.709 9=BT.2020, MAX_BPC, EOTF 0=SDR 2=PQ, PRIMARIES 2=P3-D65, COLOR_FORMAT, …) |
+| `RESTARTPGENERATOR:` | applies output settings; `CMD:GET_PGENERATOR_IS_EXECUTED` → `OK:Pid N` changes when back (~8 s) |
 | `RGB=RECTANGLE;w,h;0;r,g,b;bg_r,bg_b,bg_g;0,0,x,y;-1` | `OK` (8-bit; background is r,b,g) |
+| `RGB=RECTANGLE10bit;…` | same, 10-bit codes (non-RGB formats take an 8-bit background) |
 | `QUIT` | — |
 
-`PGenClient.connect()` checks `IS_ALIVE`, reads the resolution and RGB range, and
-every patch is sent full-screen. Patch values are full-range 8-bit and are scaled
-to 16–235 when the Pi outputs limited range (`16 + round(v × 219 / 255)`), so white
-is always peak white. Reconnect once on a dropped connection.
+`PGenClient.connect()` checks `IS_ALIVE` and reads resolution, RGB range, bit depth
+and color format. `RGBPatch` carries full-range codes at 8 or 10 bits; they are
+mapped to the Pi's depth and range (limited: 16–235 / 64–940), so white is always
+peak white. Patches are full-screen; `display_window` draws a centred box.
+
+At the start of every run the server calls `configure_output(mode, color_format)`
+(`pgen.configure_output`, default on): SDR → SDR, BT.709, 8-bit, `pgen.sdr_color_format`
+(rgb); HDR10 → HDR, PQ, BT.2020, P3 primaries, 10-bit, `pgen.hdr_color_format`
+(ycbcr422 — 10-bit RGB/4:4:4 at 4K30 may exceed the 5040UB's HDMI bandwidth; 4:2:2
+loses nothing on full-field patches). Only differing settings are written, and
+PGenerator is restarted only if something changed. HDR metadata is left as set on
+the Pi. Reconnect once on a dropped connection.
+
+### HDR10 patches
+
+HDR10 is absolute: PQ (ST 2084) in a BT.2020 container. `color_math.hdr_patch_code10`
+converts each patch's target XYZ (white = 100) to linear BT.2020, scales white to
+`calibration.hdr_white_nits` (default 100 cd/m²) and PQ-encodes per channel → 10-bit
+codes. Every patch is therefore its target colour at the target's *relative*
+luminance, so the existing relative targets (P3-D65 colors, gamma-2.2 greys) apply
+unchanged in HDR. Levels patterns use the same relative luminance PQ-encoded. In SDR,
+patches stay 8-bit (10-bit adds nothing: patches and targets are defined on 8-bit codes).
 
 ### Color Science
 
@@ -300,7 +322,9 @@ Max iterations per patch: 20 (configurable)
 - HDR has 4 modes; Mode 4 is darkest/most accurate for calibration
 - WB and CMS are accessible in HDR mode
 - SDR and HDR settings are **completely separate** — calibrate each independently
-- PMOD command (or firmware equivalent) switches picture mode
+- `DYNRANGE 05` (HDR Mode 4) is forced for HDR10 runs; the Pi is switched to an HDR10 signal
+- The gamma phase is skipped in HDR10 (the projector tone-maps PQ; gamma 2.2 doesn't apply)
+- Unverified: that the 5040UB locks to 4K30 10-bit 4:2:2 HDR from the Pi
 
 ---
 
@@ -314,6 +338,7 @@ All engine events are broadcast as JSON objects. Key events:
 {"event": "manual_step",    "step": "brightness|contrast", "title": "...", "instructions": ["..."],
                             "controls": [{"token": "BRIGHT", "label": "Brightness", "value": "128"}]}
 {"event": "manual_step_done", "step": "brightness"}
+{"event": "pgen_output",    "mode": "sdr|hdr10", "color_format": "rgb", "changed": {"MAX_BPC": "10", ...}}
 {"event": "patch_start",    "patch": "white", "iteration": 1, "mode": "wb|cms|verify"}
 {"event": "measurement",    "patch": "white", "xyz": [X,Y,Z], "delta_e": 0.42}
 {"event": "correction",     "patch": "white", "axis": "WB_R", "before": 128, "after": 131}
@@ -427,14 +452,16 @@ Results cached to `discovery/last_scan.json` (gitignored).
     "spotread_path": "spotread", "display_index": 1,
     "measurement_retries": 3, "measurement_timeout": 30.0
   },
-  "pgen": { "host": "192.168.1.101", "port": 85, "patch_settle_ms": 500 },
+  "pgen": { "host": "192.168.1.101", "port": 85, "patch_settle_ms": 500,
+            "configure_output": true, "sdr_color_format": "rgb", "hdr_color_format": "ycbcr422" },
   "calibration": {
     "delta_e_threshold": 1.0, "max_iterations_per_patch": 20,
     "wb_gain_center": 128, "wb_gain_range": [0, 255], "wb_gain_min_step": 3,
     "proportional_gain_initial": 0.8, "proportional_gain_minimum": 0.1,
     "cms_axis_order": ["red","green","blue","cyan","magenta","yellow"],
     "wb_offset_patch": "grey30", "wb_two_point_rounds": 3,
-    "gamma_tone_levels": [10,20,30,40,50,60,70,80,90], "apply_baseline_neutral": true
+    "gamma_tone_levels": [10,20,30,40,50,60,70,80,90], "apply_baseline_neutral": true,
+    "hdr_white_nits": 100
   },
   "hdr": {
     "picture_mode_command": "PMOD", "hdr10_mode_value": "HDR4",

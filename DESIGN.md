@@ -423,6 +423,12 @@ every patch is sent full-screen. Patch values are full-range 8-bit and are scale
 to 16–235 when the Pi outputs limited range (`16 + round(v × 219 / 255)`), so white
 is always peak white. Reconnect once on a dropped connection.
 
+Each run first sets the Pi's output to match the mode (`configure_output`): SDR /
+BT.709 / 8-bit / RGB, or HDR10 (PQ, BT.2020, P3 primaries, 10-bit, YCbCr 4:2:2),
+restarting PGenerator only if a setting changed. HDR10 patches are 10-bit PQ codes
+from `color_math.hdr_patch_code10`: each patch's target colour at its relative
+luminance, with white at `hdr_white_nits` (100 cd/m²).
+
 After sending, sleep `patch_settle_ms` (default 500ms) before measuring.
 
 The `PatchDisplay` Protocol (abstract interface) allows swapping in:

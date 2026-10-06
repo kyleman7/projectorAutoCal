@@ -248,3 +248,48 @@ _PATCH_RGB: dict[str, tuple[int, int, int]] = {
     "grey75":  (191, 191, 191),
     **{f"grey{pct}": (_grey_code(pct),) * 3 for pct in GREY_RAMP},
 }
+
+
+# ---- HDR10 patch signals ----------------------------------------------------------
+# HDR10 carries absolute luminance: SMPTE ST 2084 (PQ) code values in a BT.2020
+# container. Patches are defined so that "white" is a fixed stimulus luminance
+# and every other patch is its target colour at the same relative luminance as
+# its target table entry — the relative targets above then apply unchanged.
+
+# ST 2084 constants
+_PQ_M1 = 2610 / 16384
+_PQ_M2 = 2523 / 4096 * 128
+_PQ_C1 = 3424 / 4096
+_PQ_C2 = 2413 / 4096 * 32
+_PQ_C3 = 2392 / 4096 * 32
+
+# CIE XYZ → linear BT.2020 RGB (D65)
+_XYZ_TO_BT2020 = (
+    (1.7166512, -0.3556708, -0.2533663),
+    (-0.6666844, 1.6164812, 0.0157685),
+    (0.0176399, -0.0427706, 0.9421031),
+)
+
+
+def pq_encode(nits: float) -> float:
+    """ST 2084 inverse EOTF: absolute luminance (cd/m²) → PQ signal 0–1."""
+    y = max(nits, 0.0) / 10000.0
+    ym = y ** _PQ_M1
+    return ((_PQ_C1 + _PQ_C2 * ym) / (1 + _PQ_C3 * ym)) ** _PQ_M2
+
+
+def pq_code10(nits: float) -> int:
+    """Full-range 10-bit PQ code for an absolute luminance."""
+    return round(pq_encode(nits) * 1023)
+
+
+def hdr_patch_code10(patch_name: str, white_nits: float) -> tuple[int, int, int]:
+    """Full-range 10-bit BT.2020 PQ code values for an HDR10 patch.
+
+    The patch's target XYZ (white = 100) is converted to linear BT.2020 RGB,
+    scaled so white is `white_nits`, and PQ-encoded per channel.
+    """
+    X, Y, Z = xyY_to_XYZ(*get_target_xyY(patch_name, "hdr10"))
+    rgb = [sum(m * v for m, v in zip(row, (X, Y, Z))) / 100.0 for row in _XYZ_TO_BT2020]
+    # P3 sits inside BT.2020, so only rounding noise can go negative
+    return tuple(pq_code10(max(c, 0.0) * white_nits) for c in rgb)  # type: ignore[return-value]

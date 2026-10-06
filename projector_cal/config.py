@@ -76,6 +76,13 @@ class PGenConfig:
     host: str
     port: int = 85
     patch_settle_ms: int = 500
+    # Switch the Pi's HDMI output to the run's signal mode (SDR / HDR10)
+    configure_output: bool = True
+    # rgb | ycbcr444 | ycbcr422. HDR10 is 10-bit; at 4K30 that may exceed the
+    # 5040UB's HDMI bandwidth in RGB/4:4:4, and 4:2:2 costs nothing on
+    # full-field patches.
+    sdr_color_format: str = "rgb"
+    hdr_color_format: str = "ycbcr422"
 
     def __post_init__(self) -> None:
         if not self.host:
@@ -84,6 +91,9 @@ class PGenConfig:
             raise ConfigError(f"pgen.port must be 1–65535, got {self.port}")
         if self.patch_settle_ms < 0:
             raise ConfigError("pgen.patch_settle_ms must be >= 0")
+        for name in ("sdr_color_format", "hdr_color_format"):
+            if getattr(self, name) not in ("rgb", "ycbcr444", "ycbcr422"):
+                raise ConfigError(f"pgen.{name} must be rgb, ycbcr444 or ycbcr422")
 
 
 @dataclass
@@ -108,6 +118,9 @@ class CalibrationConfig:
     gamma_tone_levels: list[int] = field(default_factory=lambda: [10, 20, 30, 40, 50, 60, 70, 80, 90])
     # Reset color/tint/skin tone and processing to neutral at the start of a run
     apply_baseline_neutral: bool = True
+    # HDR10 patches: luminance (cd/m²) of the "white" stimulus; every other
+    # patch is PQ-encoded at its target luminance relative to it
+    hdr_white_nits: float = 100.0
 
     def __post_init__(self) -> None:
         if self.delta_e_threshold <= 0:
@@ -129,6 +142,8 @@ class CalibrationConfig:
             )
         if self.wb_offset_patch not in {f"grey{p}" for p in range(10, 100, 10)}:
             raise ConfigError("calibration.wb_offset_patch must be grey10…grey90")
+        if not (0 < self.hdr_white_nits <= 10000):
+            raise ConfigError("calibration.hdr_white_nits must be in (0, 10000]")
         if self.wb_two_point_rounds < 1:
             raise ConfigError("calibration.wb_two_point_rounds must be >= 1")
         if len(self.gamma_tone_levels) != 9 or any(
@@ -257,6 +272,9 @@ def _build_config(data: dict) -> Config:
             host=pgen_raw.get("host", ""),
             port=int(pgen_raw.get("port", 85)),
             patch_settle_ms=int(pgen_raw.get("patch_settle_ms", 500)),
+            configure_output=bool(pgen_raw.get("configure_output", True)),
+            sdr_color_format=str(pgen_raw.get("sdr_color_format", "rgb")),
+            hdr_color_format=str(pgen_raw.get("hdr_color_format", "ycbcr422")),
         )
 
         cal_raw = data.get("calibration", {})
@@ -275,6 +293,7 @@ def _build_config(data: dict) -> Config:
             wb_two_point_rounds=int(cal_raw.get("wb_two_point_rounds", 3)),
             gamma_tone_levels=[int(v) for v in cal_raw.get("gamma_tone_levels", range(10, 100, 10))],
             apply_baseline_neutral=bool(cal_raw.get("apply_baseline_neutral", True)),
+            hdr_white_nits=float(cal_raw.get("hdr_white_nits", 100.0)),
         )
 
         hdr_raw = data.get("hdr", {})

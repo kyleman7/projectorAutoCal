@@ -32,6 +32,8 @@ from . import picture
 from .color_math import (
     GREY_RAMP,
     delta_e_2000,
+    hdr_patch_code10,
+    pq_code10,
     get_target_lab,
     get_target_xyY,
     patch_rgb,
@@ -65,9 +67,10 @@ _GUIDE_MIN_HUE_DEG = 1.0
 _GUIDE_MIN_SAT_PCT = 2.0
 _GUIDE_MIN_LUM = 1.0
 
-# Guided levels patterns: (window, background), full-range 8-bit
-_BRIGHTNESS_PATTERN = (RGBPatch(5, 5, 5), RGBPatch(0, 0, 0))            # 2% on black
-_CONTRAST_PATTERN = (RGBPatch(250, 250, 250), RGBPatch(255, 255, 255))  # 98% on white
+# Guided levels patterns: (window, background) as SDR 8-bit grey codes;
+# HDR10 sends the same relative luminance PQ-encoded (see _grey_patch)
+_BRIGHTNESS_PATTERN = (5, 0)      # 2% box on black
+_CONTRAST_PATTERN = (250, 255)    # 98% box on white
 
 _AUTO_IRIS_NOTE = ("Turn Auto Iris off in the projector's Image menu first — it changes "
                    "light output between patches and can't be set over the network.")
@@ -290,7 +293,7 @@ class CalibrationEngine:
         recent_xyz: list[tuple[float, float, float]] = []
         recent_de: list[float] = []
 
-        self.display.display_patch(RGBPatch(*patch_rgb(patch_name)))
+        self.display.display_patch(self._patch(patch_name))
 
         for iteration in range(1, cfg.max_iterations_per_patch + 1):
             if self._abort:
@@ -445,11 +448,11 @@ class CalibrationEngine:
         title: str,
         instructions: list[str],
         controls: list[tuple[str, str]],
-        pattern: tuple[RGBPatch, RGBPatch],
+        pattern: tuple[int, int],
     ) -> None:
         """Show a pattern and let the user step projector controls until done."""
         window, background = pattern
-        self.display.display_window(window, background)
+        self.display.display_window(self._grey_patch(window), self._grey_patch(background))
         tokens = dict(controls)
 
         while not self._abort:
@@ -704,7 +707,7 @@ class CalibrationEngine:
         iteration = 0
         X = Y = Z = 0.0
 
-        self.display.display_patch(RGBPatch(*patch_rgb(axis)))
+        self.display.display_patch(self._patch(axis))
 
         for iteration in range(1, cfg.max_iterations_per_patch + 1):
             if self._abort:
@@ -767,7 +770,7 @@ class CalibrationEngine:
             if self._abort:
                 break
             self.on_event({"event": "patch_start", "patch": patch_name, "iteration": 1, "mode": "verify"})
-            self.display.display_patch(RGBPatch(*patch_rgb(patch_name)))
+            self.display.display_patch(self._patch(patch_name))
             X, Y, Z = self.measure()
             if patch_name == "white" and Y > 1e-6:
                 # White is measured first; it re-anchors relative colorimetry
@@ -800,9 +803,23 @@ class CalibrationEngine:
     # Shared helpers
     # ------------------------------------------------------------------
 
+    def _patch(self, patch_name: str) -> RGBPatch:
+        """The signal for a named patch: 8-bit video codes for SDR, 10-bit
+        BT.2020 PQ for HDR10 (white at hdr_white_nits)."""
+        if self.mode == "hdr10":
+            return RGBPatch(*hdr_patch_code10(patch_name, self.config.hdr_white_nits), bits=10)
+        return RGBPatch(*patch_rgb(patch_name))
+
+    def _grey_patch(self, code8: int) -> RGBPatch:
+        """An SDR 8-bit grey code, or the same relative luminance in HDR10."""
+        if self.mode == "hdr10":
+            level = pq_code10((code8 / 255) ** 2.2 * self.config.hdr_white_nits)
+            return RGBPatch(level, level, level, bits=10)
+        return RGBPatch(code8, code8, code8)
+
     def _measure_white_reference(self) -> None:
         """Measure the white patch to anchor relative colorimetry (white = 100)."""
-        self.display.display_patch(RGBPatch(*patch_rgb("white")))
+        self.display.display_patch(self._patch("white"))
         _, Y, _ = self.measure()
         if Y > 1e-6:
             self._ref_white_Y = Y

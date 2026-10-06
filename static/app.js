@@ -252,6 +252,12 @@ function handleEvent(ev) {
       break;
     }
 
+    case 'pgen_output':
+      logLine(Object.keys(ev.changed).length
+        ? `PGenerator output set to ${ev.mode.toUpperCase()} (${ev.color_format}); restarted to apply`
+        : `PGenerator output already ${ev.mode.toUpperCase()} (${ev.color_format})`, 'log-info');
+      break;
+
     case 'manual_step':
       showManualStep(ev);
       break;

@@ -43,7 +43,7 @@ The colorimeter connects to the host machine via USB. It mounts on a **tripod ai
 
 Turn **Auto Iris** off in the projector's Image menu before calibrating — it can't be controlled over the network and changes light output between patches.
 
-Supports both **SDR (Rec.709/D65)** and **HDR10 (DCI P3/D65)** targets. SDR and HDR settings on the projector are independent — calibrate each separately.
+Supports both **SDR (Rec.709/D65)** and **HDR10 (P3-D65)** targets. The app switches the Pi's output to match — SDR BT.709 8-bit, or HDR10 (PQ, BT.2020, 10-bit) with PQ-encoded patches. SDR and HDR settings on the projector are independent — calibrate each separately.
 
 ---
 
