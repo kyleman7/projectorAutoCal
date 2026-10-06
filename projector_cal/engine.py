@@ -125,6 +125,8 @@ class CalibrationReport:
     cms_results: list[PatchResult] = field(default_factory=list)
     # Automatic CMS: net menu steps moved per axis/control (start values unknown)
     cms_adjustments: dict[str, dict[str, int]] = field(default_factory=dict)
+    # Controls that hit a menu end stop (0/100) — their step counts overstate the travel
+    cms_at_limit: dict[str, list[str]] = field(default_factory=dict)
     verify_results: list[PatchResult] = field(default_factory=list)
     total_iterations: int = 0
     aborted: bool = False
@@ -212,6 +214,7 @@ class CalibrationEngine:
         self._actions: queue.Queue[tuple[str, str | None, int]] = queue.Queue()
         self._abort = False
         self._ref_white_Y: float | None = None
+        self._cms_at_limit: dict[str, set[str]] = {}
 
     def abort(self) -> None:
         """Signal the engine to stop after the current iteration."""
@@ -256,6 +259,7 @@ class CalibrationEngine:
                 report.gamma_results = self._phase_gamma()
             elif phase == "cms":
                 report.cms_results = self._phase2_cms()
+                report.cms_at_limit = {a: sorted(c) for a, c in self._cms_at_limit.items() if c}
                 if self.cms_menu is not None:
                     report.cms_adjustments = {
                         axis: {c: n for c, n in moved.items() if n}
@@ -757,6 +761,11 @@ class CalibrationEngine:
         iteration = 0
         X = Y = Z = 0.0
         last_move: tuple[str, int, float] | None = None
+        # A control whose moves stop having any effect has hit a menu end stop
+        # (0/100); two such moves in one direction block that direction.
+        stalls = {c: 0 for c in _CMS_CONTROLS}
+        blocked: dict[str, int] = {}
+        at_limit = self._cms_at_limit.setdefault(axis, set())
 
         self.display.display_patch(self._patch(axis))
         menu.open_axis(axis)
@@ -789,6 +798,15 @@ class CalibrationEngine:
                     lo, hi = _CMS_GAIN_BOUNDS
                     g = observed / steps
                     gains[control] = math.copysign(min(hi, max(lo, abs(g))), g)
+                    stalls[control] = 0
+                else:
+                    stalls[control] += 1
+                    if stalls[control] >= 2:
+                        blocked[control] = 1 if steps > 0 else -1
+                        at_limit.add(control)
+                        logger.warning("CMS %s.%s stopped responding — menu limit reached", axis, control)
+                        self.on_event({"event": "warning", "message":
+                            f"CMS {axis} {control.lower()} reached its menu limit; leaving it there."})
 
             if de < cfg.delta_e_threshold:
                 converged = True
@@ -806,10 +824,17 @@ class CalibrationEngine:
                             move(c, best[c] - offsets[c])
                     break
 
-            control = max(_CMS_CONTROLS, key=lambda c: abs(errs[c]) / _CMS_NOISE[c])
+            def wanted(c: str) -> int:
+                return 1 if errs[c] * gains[c] > 0 else -1
+
+            usable = [c for c in _CMS_CONTROLS if blocked.get(c) != wanted(c)]
+            if not usable:
+                logger.warning("CMS %s: every useful control is at a menu limit", axis)
+                break
+            control = max(usable, key=lambda c: abs(errs[c]) / _CMS_NOISE[c])
             steps = round(errs[control] / gains[control])
             if steps == 0:
-                steps = 1 if errs[control] * gains[control] > 0 else -1
+                steps = wanted(control)
             steps = max(-_CMS_MAX_STEP, min(_CMS_MAX_STEP, steps))
             # Keep each control within its travel limit from the starting value
             steps = max(-_CMS_MAX_OFFSET - offsets[control], min(_CMS_MAX_OFFSET - offsets[control], steps))
@@ -1122,5 +1147,6 @@ def _report_to_dict(report: CalibrationReport) -> dict:
         "gamma_results": [_patch_dict(p) for p in report.gamma_results],
         "cms_results": [_patch_dict(p) for p in report.cms_results],
         "cms_adjustments": report.cms_adjustments,
+        "cms_at_limit": report.cms_at_limit,
         "verify_results": [_patch_dict(p) for p in report.verify_results],
     }

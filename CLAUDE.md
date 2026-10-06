@@ -327,6 +327,10 @@ Automatic (`"auto"`, default; needs `cms_menu`, never in dry runs):
   Each control's gain (error per step, signed) is re-estimated from every move above the
   noise floor, so unknown sensitivities and inverted controls are learned. Divergence guard
   reverts to the best offsets. The menu is always closed afterwards (also on abort)
+- Menu end stops (0/100): two moves in one direction with no measurable effect block that
+  direction, emit a `warning`, and list the control in `report.cms_at_limit` — its step count
+  overstates the real travel (first real run: cyan saturation 75 + 30 steps → stuck at 100).
+  A single no-effect move is tolerated (red brightness has a dead zone just below 61)
 - Values can't be read back: `RgbcmyMenu.offsets` / `report.cms_adjustments` record net steps
 - Verified live: red ΔE 3.11 → 0.95 in 7 readings (~3 min); step counts exact (webcam-checked)
 

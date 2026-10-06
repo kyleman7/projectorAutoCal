@@ -734,12 +734,14 @@ class TestHdrPatches:
 class FakeMenu:
     """RgbcmyMenu stand-in that edits FakeProjector.cms like the real panel.
 
-    `invert` lists controls whose Right press moves the value the other way.
+    `invert` lists controls whose Right press moves the value the other way;
+    `limits` clamps controls like the menu's 0/100 end stops.
     """
 
-    def __init__(self, proj: FakeProjector, invert=()):
+    def __init__(self, proj: FakeProjector, invert=(), limits=None):
         self.proj = proj
         self.invert = set(invert)
+        self.limits = limits or {}
         self.axis = None
         self.open_count = 0
         self.closed = True
@@ -751,7 +753,9 @@ class FakeMenu:
 
     def step(self, control, steps):
         sign = -1 if control in self.invert else 1
-        self.proj.cms[self.axis][control] += sign * steps
+        value = self.proj.cms[self.axis][control] + sign * steps
+        lo, hi = self.limits.get(control, (-999, 999))
+        self.proj.cms[self.axis][control] = max(lo, min(hi, value))
         self.offsets[self.axis][control] += steps
 
     def close(self):
@@ -815,3 +819,15 @@ class TestAutoCMS:
         engine.measure = measure_then_abort
         engine._phase2_cms()
         assert menu.closed
+
+    def test_stops_pushing_a_control_at_its_menu_limit(self):
+        """Saturation can only reach 2 of the 5 steps it needs (end stop)."""
+        proj = FakeProjector()
+        menu = FakeMenu(proj, limits={"SAT": (-100, 2)})
+        moves = []
+        engine = self._engine(proj, menu, on_event=moves.append)
+        report = engine.run(["cms"])
+        sat_moves = [e for e in moves if e["event"] == "correction" and e["axis"] == "CMS_red_SAT"]
+        assert len(sat_moves) <= 4          # not ground on until the iteration limit
+        assert report.cms_at_limit == {"red": ["SAT"]}
+        assert any(e["event"] == "warning" and "limit" in e["message"] for e in moves)
