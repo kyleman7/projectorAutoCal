@@ -1,11 +1,18 @@
 """Calibration engine: the closed-loop correction algorithm.
 
-Three phases:
-  Phase 1 — White Balance: adjust R/G/B gains to hit D65 white point on the white patch.
-  Phase 2 — CMS (guided): the 5040UB exposes no RGBCMY commands over ESC/VP21,
-             so each color axis is measured and the user is told which menu
-             control to move; they adjust by hand, then re-measure or move on.
-  Phase 3 — Verification: final measurement pass, no corrections, produces the report.
+Phases, in run order:
+  Baseline      — snapshot every picture setting, then neutralize the ones that
+                  would bias a calibration (color/tint/skin tone, processing).
+  Levels        — guided: brightness and contrast set by eye on test patterns,
+                  with the user stepping the projector from the UI.
+  White Balance — two-point: R/B gains on white and R/B offsets on a dark grey,
+                  alternated until both points hit D65.
+  Gamma         — the 9 custom-gamma points (GAMMALV) tuned against a gamma-2.2
+                  grey ramp (SDR only).
+  CMS (guided)  — the 5040UB exposes no RGBCMY commands over ESC/VP21, so each
+                  color axis is measured and the user is told which menu control
+                  to move; they adjust by hand, then re-measure or move on.
+  Verification  — final measurement pass, no corrections, produces the report.
 
 The engine is hardware-agnostic: it depends on ProjectorClient, a PatchDisplay adapter,
 and a measure() callable — all injected at construction time.
@@ -19,9 +26,11 @@ import logging
 import math
 import queue
 from dataclasses import dataclass, field
-from typing import Callable, Literal
+from typing import Callable, Literal, Sequence
 
+from . import picture
 from .color_math import (
+    GREY_RAMP,
     delta_e_2000,
     get_target_lab,
     get_target_xyY,
@@ -35,9 +44,11 @@ from .projector import ProjectorClient, ProjectorError
 
 logger = logging.getLogger(__name__)
 
-# Patches measured in Phase 2 and Phase 3
+# Correction phases in run order (baseline always runs first, verify last)
+PHASES = ("levels", "wb", "gamma", "cms")
+
 _CMS_PATCHES = ["red", "green", "blue", "cyan", "magenta", "yellow"]
-_VERIFY_PATCHES = ["white", "red", "green", "blue", "cyan", "magenta", "yellow", "grey75", "grey50"]
+_VERIFY_PATCHES = ["white", *_CMS_PATCHES, *(f"grey{pct}" for pct in reversed(GREY_RAMP))]
 
 # Consecutive non-improving iterations before a patch loop reverts to its
 # best-known settings and stops (protects against a wrong control-direction
@@ -53,6 +64,13 @@ _HUE_WHEEL = ["red", "yellow", "green", "cyan", "blue", "magenta"]
 _GUIDE_MIN_HUE_DEG = 1.0
 _GUIDE_MIN_SAT_PCT = 2.0
 _GUIDE_MIN_LUM = 1.0
+
+# Guided levels patterns: (window, background), full-range 8-bit
+_BRIGHTNESS_PATTERN = (RGBPatch(5, 5, 5), RGBPatch(0, 0, 0))            # 2% on black
+_CONTRAST_PATTERN = (RGBPatch(250, 250, 250), RGBPatch(255, 255, 255))  # 98% on white
+
+_AUTO_IRIS_NOTE = ("Turn Auto Iris off in the projector's Image menu first — it changes "
+                   "light output between patches and can't be set over the network.")
 
 
 # ---------------------------------------------------------------------------
@@ -84,22 +102,25 @@ class _LoopOutcome:
 class CalibrationReport:
     """Complete result from one calibration run."""
     mode: Literal["sdr", "hdr10"]
-    phase: Literal["wb", "cms", "all"]
+    phase: str                     # "all" or the comma-joined phases that ran
     delta_e_threshold: float
-    wb_result: PatchResult | None = None
+    baseline: dict[str, str] = field(default_factory=dict)   # settings before the run
+    wb_result: PatchResult | None = None                      # gains, on white
+    wb_offset_result: PatchResult | None = None               # offsets, on a dark grey
+    gamma_results: list[PatchResult] = field(default_factory=list)
     cms_results: list[PatchResult] = field(default_factory=list)
     verify_results: list[PatchResult] = field(default_factory=list)
     total_iterations: int = 0
     aborted: bool = False
 
     @property
+    def correction_results(self) -> list[PatchResult]:
+        results = [p for p in (self.wb_result, self.wb_offset_result) if p]
+        return results + self.gamma_results + self.cms_results
+
+    @property
     def patches(self) -> list[PatchResult]:
-        results = []
-        if self.wb_result:
-            results.append(self.wb_result)
-        results.extend(self.cms_results)
-        results.extend(self.verify_results)
-        return results
+        return self.correction_results + self.verify_results
 
     @property
     def converged_patches(self) -> int:
@@ -137,14 +158,13 @@ class CalibrationEngine:
         measure: Callable that returns (X, Y, Z) — typically Colorimeter.measure.
         config: CalibrationConfig with thresholds and gain ranges.
         mode: "sdr" or "hdr10".
-        dry_run: If True, send corrections to projector but don't apply them (no-op).
+        dry_run: If True, never write to the projector (measure and report only).
         on_event: Optional callback for WebSocket events.
         anomaly_check: Optional callable(patch, recent_xyz, recent_de) -> dict
             (see agents.anomaly_detector.detect_anomaly). Called every 3rd
             iteration; its "action" may retry a measurement or abort the patch.
-        interactive_cms: If True, guided CMS waits after each guidance event
-            for submit_cms_action() ("remeasure" or "next"). If False, each
-            axis is measured once and its guidance reported.
+        interactive: If True, guided steps (levels, CMS) wait for the user via
+            submit_action(). If False, each guided step is shown/measured once.
     """
 
     def __init__(
@@ -157,7 +177,7 @@ class CalibrationEngine:
         dry_run: bool = False,
         on_event: EventCallback = _noop_event,
         anomaly_check: Callable[[str, list, list], dict] | None = None,
-        interactive_cms: bool = False,
+        interactive: bool = False,
     ) -> None:
         self.projector = projector
         self.display = display
@@ -167,65 +187,59 @@ class CalibrationEngine:
         self.dry_run = dry_run
         self.on_event = on_event
         self.anomaly_check = anomaly_check
-        self.interactive_cms = interactive_cms
-        self._cms_actions: queue.Queue[str] = queue.Queue()
+        self.interactive = interactive
+        self._actions: queue.Queue[tuple[str, str | None, int]] = queue.Queue()
         self._abort = False
         self._ref_white_Y: float | None = None
 
     def abort(self) -> None:
         """Signal the engine to stop after the current iteration."""
         self._abort = True
-        self._cms_actions.put("abort")  # release a pending guided-CMS wait
+        self._actions.put(("abort", None, 0))  # release a pending guided-step wait
 
-    def submit_cms_action(self, action: str) -> None:
-        """User response to a cms_guidance event: "remeasure" or "next"."""
-        self._cms_actions.put(action)
+    def submit_action(self, action: str, token: str | None = None, direction: int = 0) -> None:
+        """User response to a guided step.
+
+        "remeasure" / "next" answer a cms_guidance prompt; "adjust" (with a
+        setting token and ±1 direction) steps a control in a manual_step;
+        "next" also finishes a manual_step.
+        """
+        self._actions.put((action, token, direction))
 
     # ------------------------------------------------------------------
-    # Top-level entry points
+    # Top-level entry point
     # ------------------------------------------------------------------
 
-    def run_all(self) -> CalibrationReport:
-        """Run Phase 1 (WB) + Phase 2 (CMS) + Phase 3 (verify)."""
+    def run(self, phases: Sequence[str] = PHASES) -> CalibrationReport:
+        """Baseline, then the requested phases in canonical order, then verify."""
+        unknown = set(phases) - set(PHASES)
+        if unknown:
+            raise ValueError(f"Unknown phases: {sorted(unknown)}")
         report = CalibrationReport(
             mode=self.mode,
-            phase="all",
+            phase="all" if set(phases) == set(PHASES) else ",".join(p for p in PHASES if p in phases),
             delta_e_threshold=self.config.delta_e_threshold,
         )
-        report.wb_result = self._phase1_white_balance()
-        report.total_iterations += report.wb_result.iterations
+        report.baseline = self._phase0_baseline()
 
-        if not self._abort:
-            for result in self._phase2_cms():
-                report.cms_results.append(result)
-                report.total_iterations += result.iterations
+        for phase in PHASES:
+            if self._abort:
+                break
+            if phase not in phases:
+                continue
+            if phase == "levels":
+                self._phase_levels()
+            elif phase == "wb":
+                report.wb_result, report.wb_offset_result = self._phase1_white_balance()
+            elif phase == "gamma":
+                report.gamma_results = self._phase_gamma()
+            elif phase == "cms":
+                report.cms_results = self._phase2_cms()
 
-        if not self._abort:
-            report.verify_results = self._phase3_verify()
-
-        report.aborted = self._abort
-        self.on_event({"event": "run_complete", "report": _report_to_dict(report)})
-        return report
-
-    def run_wb_only(self) -> CalibrationReport:
-        """Run Phase 1 (WB) + Phase 3 (verify) only."""
-        report = CalibrationReport(mode=self.mode, phase="wb", delta_e_threshold=self.config.delta_e_threshold)
-        report.wb_result = self._phase1_white_balance()
-        report.total_iterations = report.wb_result.iterations
+        report.total_iterations = sum(p.iterations for p in report.correction_results)
         if not self._abort:
             report.verify_results = self._phase3_verify()
-        report.aborted = self._abort
-        self.on_event({"event": "run_complete", "report": _report_to_dict(report)})
-        return report
 
-    def run_cms_only(self) -> CalibrationReport:
-        """Run Phase 2 (CMS) + Phase 3 (verify) only (assumes WB already done)."""
-        report = CalibrationReport(mode=self.mode, phase="cms", delta_e_threshold=self.config.delta_e_threshold)
-        for result in self._phase2_cms():
-            report.cms_results.append(result)
-            report.total_iterations += result.iterations
-        if not self._abort:
-            report.verify_results = self._phase3_verify()
         report.aborted = self._abort
         self.on_event({"event": "run_complete", "report": _report_to_dict(report)})
         return report
@@ -234,8 +248,8 @@ class CalibrationEngine:
     # Shared correction loop
     # ------------------------------------------------------------------
     #
-    # The automatic (WB) phase runs a closed loop: measure → normalize → ΔE →
-    # converge/diverge checks → anomaly check → compute and apply a
+    # The automatic phases (WB, gamma) run a closed loop: measure → normalize →
+    # ΔE → converge/diverge checks → anomaly check → compute and apply a
     # proportional correction → decay the step. The normalization and the
     # correction physics are injected as callables.
 
@@ -253,7 +267,7 @@ class CalibrationEngine:
 
         Args:
             patch_name: Patch under correction (also the event name).
-            mode: "wb" or "cms" — for patch_start events and log lines.
+            mode: "wb" or "gamma" — for patch_start events and log lines.
             settings: Live control values (mutated in place via apply_settings).
             normalize: Maps a raw absolute XYZ reading to the white=100 scale.
             target_lab: Lab target the loop converges toward.
@@ -354,7 +368,7 @@ class CalibrationEngine:
         (unless dry-run), and emit correction events; mutates `current` in place.
 
         With `read_back`, `current` records the value the projector actually
-        stored — the 5040UB quantizes gains, so the requested value can differ.
+        stored — the 5040UB quantizes values, so the requested value can differ.
         """
         for key in current:
             if new[key] != current[key]:
@@ -385,11 +399,149 @@ class CalibrationEngine:
         return result
 
     # ------------------------------------------------------------------
-    # Phase 1 — White Balance
+    # Phase 0 — Baseline
     # ------------------------------------------------------------------
 
-    def _phase1_white_balance(self) -> PatchResult:
-        """Adjust R/G/B gains to match D65 white point on the white patch."""
+    def _phase0_baseline(self) -> dict[str, str]:
+        """Record every picture setting, then neutralize the biasing ones."""
+        snapshot = picture.read_settings(self.projector)
+        applied: dict[str, str] = {}
+        if self.config.apply_baseline_neutral and not self.dry_run:
+            applied = picture.neutralize(self.projector)
+        logger.info("Baseline: %d settings recorded, neutralized %s", len(snapshot), applied)
+        self.on_event({"event": "baseline", "settings": snapshot, "neutralized": applied})
+        return snapshot
+
+    # ------------------------------------------------------------------
+    # Levels — guided brightness / contrast
+    # ------------------------------------------------------------------
+
+    def _phase_levels(self) -> None:
+        self.on_event({"event": "phase_start", "phase": "levels", "patch_count": 0})
+        logger.info("Levels (guided) [mode=%s]", self.mode)
+        self._manual_step(
+            "brightness", "Set Brightness (black level)",
+            [_AUTO_IRIS_NOTE,
+             "The screen shows a near-black square (2% grey) on black.",
+             "Lower Brightness until the square disappears, then raise it until it is just visible again."],
+            [("BRIGHT", "Brightness")],
+            _BRIGHTNESS_PATTERN,
+        )
+        if not self._abort:
+            self._manual_step(
+                "contrast", "Set Contrast (white level)",
+                ["The screen shows a slightly darker square (98% white) on full white.",
+                 "Raise Contrast until the square blends into the background, then lower it until "
+                 "the square is just visible again.",
+                 "If the white turns tinted before the square disappears, stop there."],
+                [("CONTRAST", "Contrast")],
+                _CONTRAST_PATTERN,
+            )
+        self.on_event({"event": "phase_done", "phase": "levels"})
+
+    def _manual_step(
+        self,
+        step: str,
+        title: str,
+        instructions: list[str],
+        controls: list[tuple[str, str]],
+        pattern: tuple[RGBPatch, RGBPatch],
+    ) -> None:
+        """Show a pattern and let the user step projector controls until done."""
+        window, background = pattern
+        self.display.display_window(window, background)
+        tokens = dict(controls)
+
+        while not self._abort:
+            values: dict[str, str | None] = {}
+            for token in tokens:
+                try:
+                    values[token] = self.projector.get_setting(token)
+                except ProjectorError:
+                    values[token] = None
+            self._drain_actions()
+            self.on_event({
+                "event": "manual_step", "step": step, "title": title, "instructions": instructions,
+                "controls": [{"token": t, "label": label, "value": values[t]} for t, label in controls],
+            })
+            if not self.interactive:
+                break
+            action, token, direction = self._wait_for_action()
+            if action == "adjust" and token in tokens and direction in (-1, 1):
+                if self.dry_run:
+                    logger.info("Dry run — not adjusting %s", token)
+                else:
+                    try:
+                        picture.nudge(self.projector, token, direction)
+                    except (ProjectorError, ValueError) as e:
+                        logger.warning("Adjusting %s failed: %s", token, e)
+                continue
+            if action == "remeasure":
+                continue
+            break
+
+        self.on_event({"event": "manual_step_done", "step": step})
+
+    # ------------------------------------------------------------------
+    # Phase 1 — White Balance (two-point)
+    # ------------------------------------------------------------------
+
+    def _phase1_white_balance(self) -> tuple[PatchResult, PatchResult | None]:
+        """Gains on white and offsets on a dark grey, alternated until both settle.
+
+        Gains move the top of the grey scale and offsets the bottom, but each
+        also shifts the other point, so the pair is repeated (up to
+        wb_two_point_rounds) until a round needs no correction at either point.
+        """
+        cfg = self.config
+        try:
+            self.projector.get_setting("OFFSETR")
+            has_offsets = True
+        except ProjectorError:
+            has_offsets = False
+            logger.warning("Projector rejects OFFSETR — single-point (gain-only) white balance")
+
+        low_patch = cfg.wb_offset_patch
+        self.on_event({"event": "phase_start", "phase": "wb", "patch_count": 2 if has_offsets else 1})
+        logger.info("Phase 1: White Balance [mode=%s, %s]", self.mode,
+                    f"two-point, offsets on {low_patch}" if has_offsets else "gain only")
+
+        hi = lo = None
+        hi_first_de = lo_first_de = None
+        hi_iters = lo_iters = 0
+        for round_no in range(1, (cfg.wb_two_point_rounds if has_offsets else 1) + 1):
+            hi = self._wb_point("white", "gain")
+            hi_iters += hi.iterations
+            hi_first_de = hi.initial_de if hi_first_de is None else hi_first_de
+            if self._abort or not has_offsets:
+                break
+            lo = self._wb_point(low_patch, "offset")
+            lo_iters += lo.iterations
+            lo_first_de = lo.initial_de if lo_first_de is None else lo_first_de
+            settled = all(o.converged and o.iterations == 1 for o in (hi, lo))
+            logger.info("WB round %d: white ΔE=%.3f, %s ΔE=%.3f", round_no, hi.final_de, low_patch, lo.final_de)
+            if settled or self._abort:
+                break
+
+        if hi.xyz[1] > 1e-6:
+            # White luminance anchors relative colorimetry for later phases
+            self._ref_white_Y = hi.xyz[1]
+
+        hi.initial_de, hi.iterations = hi_first_de, hi_iters
+        white_result = self._emit_patch_result(hi, "white")
+        low_result = None
+        if lo is not None:
+            lo.initial_de, lo.iterations = lo_first_de, lo_iters
+            low_result = self._emit_patch_result(lo, low_patch)
+        self.on_event({"event": "phase_done", "phase": "wb"})
+        return white_result, low_result
+
+    def _wb_point(self, patch: str, kind: Literal["gain", "offset"]) -> _LoopOutcome:
+        """Correct one grey-scale point's chromaticity with gains or offsets.
+
+        G is the fixed reference channel (its error is 0 by construction after
+        normalizing to Y=100); R and B move.
+        """
         cfg = self.config
         gain_lo, gain_hi = cfg.wb_gain_range
         gain_range = gain_hi - gain_lo
@@ -399,19 +551,24 @@ class CalibrationEngine:
         # D65 target at the normalized luminance — loop-invariant
         target_X, target_Y, target_Z = xyY_to_XYZ(target_x, target_y, 100.0)
 
-        self.on_event({"event": "phase_start", "phase": "wb"})
-        logger.info("Phase 1: White Balance [mode=%s]", self.mode)
+        if kind == "gain":
+            get, put = self.projector.get_wb_gain, self.projector.set_wb_gain
+            names = {"R": "WB_R", "G": "WB_G", "B": "WB_B"}
+        else:
+            def get(ch: str) -> int:
+                return int(self.projector.get_setting(f"OFFSET{ch}"))
 
-        gains = {
-            "R": self.projector.get_wb_gain("R"),
-            "G": self.projector.get_wb_gain("G"),
-            "B": self.projector.get_wb_gain("B"),
-        }
-        logger.debug("Initial gains: %s", gains)
+            def put(ch: str, value: int) -> None:
+                self.projector.set_setting(f"OFFSET{ch}", value)
+            names = {"R": "WB_OFFSET_R", "G": "WB_OFFSET_G", "B": "WB_OFFSET_B"}
+
+        values = {ch: get(ch) for ch in ("R", "G", "B")}
+        logger.debug("Initial %s values: %s", kind, values)
 
         def normalize(xyz: tuple[float, float, float]) -> tuple[float, float, float]:
             # WB corrects chromaticity only: normalize each reading to Y=100 so
-            # the absolute light level (cd/m²) doesn't dominate the ΔE.
+            # the light level (absolute, or the grey's own level) doesn't
+            # dominate the ΔE.
             X, Y, Z = xyz
             s = 100.0 / Y if Y > 1e-6 else 1.0
             return (X * s, Y * s, Z * s)
@@ -429,20 +586,88 @@ class CalibrationEngine:
             }
 
         def apply(current: dict, new: dict) -> None:
-            self._apply_settings("white", current, new,
-                                 {"R": "WB_R", "G": "WB_G", "B": "WB_B"},
-                                 self.projector.set_wb_gain,
-                                 read_back=self.projector.get_wb_gain)
+            self._apply_settings(patch, current, new, names, put, read_back=get)
 
-        outcome = self._correction_loop("white", "wb", gains, normalize, target_lab, corrections, apply)
+        return self._correction_loop(patch, "wb", values, normalize, target_lab, corrections, apply)
 
-        if outcome.xyz[1] > 1e-6:
-            # White luminance anchors relative colorimetry for phases 2 and 3
-            self._ref_white_Y = outcome.xyz[1]
+    # ------------------------------------------------------------------
+    # Gamma — custom gamma points
+    # ------------------------------------------------------------------
 
-        result = self._emit_patch_result(outcome, "white")
-        self.on_event({"event": "phase_done", "phase": "wb"})
-        return result
+    def _phase_gamma(self) -> list[PatchResult]:
+        """Tune the custom-gamma points so the grey ramp tracks gamma 2.2.
+
+        Each GAMMALV tone is paired with one grey level (cfg.gamma_tone_levels).
+        Readings are reduced to lightness only — chromaticity is the WB
+        phase's job — so ΔE here is the L* error against the target.
+        """
+        cfg = self.config
+        levels = cfg.gamma_tone_levels
+        self.on_event({"event": "phase_start", "phase": "gamma", "patch_count": len(levels)})
+        results: list[PatchResult] = []
+
+        if self.mode != "sdr":
+            # HDR10 is PQ tone-mapped by the projector; a power-law target is wrong
+            logger.warning("Gamma phase skipped in %s mode — targets are SDR gamma 2.2", self.mode)
+            self.on_event({"event": "warning", "message": "Gamma calibration is SDR-only; skipped for HDR10."})
+            self.on_event({"event": "phase_done", "phase": "gamma"})
+            return results
+        try:
+            current_gamma = self.projector.get_setting("GAMMA")
+        except ProjectorError as e:
+            logger.warning("Gamma phase skipped — projector rejects GAMMA?: %s", e)
+            self.on_event({"event": "phase_done", "phase": "gamma"})
+            return results
+
+        logger.info("Gamma: tuning %d custom points [gamma preset was %s]", len(levels), current_gamma)
+        if current_gamma != picture.GAMMA_CUSTOM:
+            self.on_event({"event": "correction", "patch": "gamma", "axis": "GAMMA",
+                           "before": current_gamma, "after": picture.GAMMA_CUSTOM})
+            if not self.dry_run:
+                self.projector.set_setting("GAMMA", picture.GAMMA_CUSTOM)
+
+        self._measure_white_reference()  # WB moved white since phase 1's reading
+        Xw, Yw, Zw = xyY_to_XYZ(*get_target_xyY("white", self.mode))
+
+        for tone, pct in enumerate(levels):
+            if self._abort:
+                break
+            results.append(self._gamma_point(tone, f"grey{pct}", (Xw / Yw, Zw / Yw)))
+
+        self.on_event({"event": "phase_done", "phase": "gamma"})
+        return results
+
+    def _gamma_point(self, tone: int, patch: str, white_ratios: tuple[float, float]) -> PatchResult:
+        cfg = self.config
+        param = f"{tone:02d}"
+        target_lab = get_target_lab(patch, self.mode)
+        xw, zw = white_ratios
+
+        def get(_key: str) -> int:
+            return int(self.projector.get_setting("GAMMALV", param))
+
+        def put(_key: str, value: int) -> None:
+            self.projector.set_setting("GAMMALV", value, param)
+
+        values = {"V": get("V")}
+
+        def normalize(xyz: tuple[float, float, float]) -> tuple[float, float, float]:
+            # Relative luminance on the white=100 scale, placed on the neutral
+            # axis so the Lab comparison sees lightness error only
+            Y = self._to_relative(*xyz)[1]
+            return (xw * Y, Y, zw * Y)
+
+        def corrections(norm_xyz: tuple, meas_lab: tuple, current: dict, step_scale: float) -> dict:
+            # Assumes a higher GAMMALV value brightens its tone; if inverted,
+            # the divergence guard reverts instead of walking away
+            err = (target_lab[0] - meas_lab[0]) / 100.0
+            return {"V": _clamp(current["V"] + _gain_delta(err, step_scale, 255, cfg.wb_gain_min_step), 0, 255)}
+
+        def apply(current: dict, new: dict) -> None:
+            self._apply_settings(patch, current, new, {"V": f"GAMMA_{tone + 1}"}, put, read_back=get)
+
+        outcome = self._correction_loop(patch, "gamma", values, normalize, target_lab, corrections, apply)
+        return self._emit_patch_result(outcome, patch)
 
     # ------------------------------------------------------------------
     # Phase 2 — CMS
@@ -450,7 +675,7 @@ class CalibrationEngine:
 
     def _phase2_cms(self) -> list[PatchResult]:
         """Guided CMS: measure each color axis and tell the user what to adjust."""
-        self.on_event({"event": "phase_start", "phase": "cms"})
+        self.on_event({"event": "phase_start", "phase": "cms", "patch_count": len(self.config.cms_axis_order)})
         logger.info("Phase 2: CMS (guided) [mode=%s]", self.mode)
         if self._ref_white_Y is None:
             self._measure_white_reference()
@@ -499,42 +724,42 @@ class CalibrationEngine:
                 converged = True
                 break
 
-            self._drain_cms_actions()
+            self._drain_actions()
             self.on_event({
                 "event": "cms_guidance", "patch": axis, "iteration": iteration,
                 "delta_e": de, "guidance": cms_guidance(axis, meas_lab, target_lab),
             })
-            if not self.interactive_cms or iteration == cfg.max_iterations_per_patch:
+            if not self.interactive or iteration == cfg.max_iterations_per_patch:
                 break
-            if self._wait_for_cms_action() != "remeasure":
+            if self._wait_for_action()[0] != "remeasure":
                 break
 
         outcome = _LoopOutcome(final_de=de, initial_de=initial_de, iterations=iteration,
                                converged=converged, xyz=(X, Y, Z))
         return self._emit_patch_result(outcome, axis)
 
-    def _drain_cms_actions(self) -> None:
-        """Discard clicks left over from an earlier guidance prompt."""
+    def _drain_actions(self) -> None:
+        """Discard clicks left over from an earlier prompt."""
         while True:
             try:
-                self._cms_actions.get_nowait()
+                self._actions.get_nowait()
             except queue.Empty:
                 return
 
-    def _wait_for_cms_action(self) -> str:
-        """Block until the user answers the guidance prompt (or the run aborts)."""
+    def _wait_for_action(self) -> tuple[str, str | None, int]:
+        """Block until the user answers the current prompt (or the run aborts)."""
         if self._abort:
-            return "abort"
-        action = self._cms_actions.get()
-        return "abort" if self._abort else action
+            return ("abort", None, 0)
+        action = self._actions.get()
+        return ("abort", None, 0) if self._abort else action
 
     # ------------------------------------------------------------------
     # Phase 3 — Verification
     # ------------------------------------------------------------------
 
     def _phase3_verify(self) -> list[PatchResult]:
-        """Measure all patches without applying corrections."""
-        self.on_event({"event": "phase_start", "phase": "verify"})
+        """Measure white, the colors and the grey ramp without applying corrections."""
+        self.on_event({"event": "phase_start", "phase": "verify", "patch_count": len(_VERIFY_PATCHES)})
         logger.info("Phase 3: Verification")
         results: list[PatchResult] = []
 
@@ -707,7 +932,9 @@ def _report_to_dict(report: CalibrationReport) -> dict:
             return None
         return round(v, 4)
 
-    def _patch_dict(p: PatchResult) -> dict:
+    def _patch_dict(p: PatchResult | None) -> dict | None:
+        if p is None:
+            return None
         return {
             "patch": p.patch_name,
             "delta_e": _num(p.final_delta_e),
@@ -724,7 +951,10 @@ def _report_to_dict(report: CalibrationReport) -> dict:
         "total_iterations": report.total_iterations,
         "converged_patches": report.converged_patches,
         "aborted": report.aborted,
-        "wb_result": _patch_dict(report.wb_result) if report.wb_result else None,
+        "baseline": report.baseline,
+        "wb_result": _patch_dict(report.wb_result),
+        "wb_offset_result": _patch_dict(report.wb_offset_result),
+        "gamma_results": [_patch_dict(p) for p in report.gamma_results],
         "cms_results": [_patch_dict(p) for p in report.cms_results],
         "verify_results": [_patch_dict(p) for p in report.verify_results],
     }

@@ -397,14 +397,15 @@ class ProjectorClient:
         if self.command_settle_ms > 0:
             time.sleep(self.command_settle_ms / 1000.0)
 
-    def _send_query(self, command: str) -> str:
-        """Send QUERY; return VALUE string or raise ProjectorError on ERR."""
-        payload = f"{command}?\r".encode(_ENCODING)
-        logger.debug("GET  %s?", command)
+    def _send_query(self, command: str, param: str | None = None) -> str:
+        """Send QUERY (``CMD?`` or ``CMD? PARAM``); return VALUE or raise ProjectorError on ERR."""
+        query = f"{command}?" if param is None else f"{command}? {param}"
+        payload = f"{query}\r".encode(_ENCODING)
+        logger.debug("GET  %s", query)
         response = self._send_raw(payload)
         if "ERR" in response:
             raise ProjectorError(
-                f"Projector rejected query '{command}?': {response}"
+                f"Projector rejected query '{query}': {response}"
             )
         prefix = f"{command}="
         if response.startswith(prefix):
@@ -482,6 +483,23 @@ class ProjectorClient:
     # ------------------------------------------------------------------
     # Probe helper
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # Generic picture settings (documented tokens — see picture.py)
+    # ------------------------------------------------------------------
+
+    def get_setting(self, token: str, param: str | None = None) -> str:
+        """Query a setting, e.g. ``BRIGHT`` or ``GAMMALV`` with param ``"03"``."""
+        value = self._send_query(token, param).strip()
+        # A parameterized reply may echo the parameter before the value
+        if param is not None and value.startswith(param + " "):
+            value = value[len(param) + 1:].strip()
+        return value
+
+    def set_setting(self, token: str, value: str | int, param: str | None = None) -> None:
+        """Set a setting: ``TOKEN VALUE`` or ``TOKEN PARAM VALUE``."""
+        self._send_command(token, str(value) if param is None else f"{param} {value}")
+        logger.info("%s%s → %s", token, f" {param}" if param else "", value)
 
     def get_power_status(self) -> str:
         """Query PWR? — answered by every ESC/VP21 projector, even in standby.

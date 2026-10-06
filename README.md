@@ -33,11 +33,15 @@ The colorimeter connects to the host machine via USB. It mounts on a **tripod ai
 └─────────────┘
 ```
 
-**Three calibration phases:**
+**Calibration phases** (every run starts by recording all picture settings and resetting Color, Tint, Skin tone and image processing to neutral):
 
-1. **White Balance** — adjusts R/G/B gains to hit the D65 white point
-2. **CMS (6-axis, guided)** — measures red, green, blue, cyan, magenta, and yellow and tells you which Hue / Saturation / Brightness control to change in the projector's RGBCMY menu (the 5040UB has no network commands for CMS), re-measuring after each adjustment
-3. **Verification** — final measurement pass across all 9 patches with no corrections applied
+1. **Brightness / Contrast (guided)** — test patterns on screen; step the projector's black and white level from the browser until the pattern looks right
+2. **White Balance (two-point)** — adjusts R/G/B gains on white and R/G/B offsets on a dark grey until both sit on the D65 white point
+3. **Gamma (SDR)** — tunes the projector's 9 custom-gamma points so a 10–90% grey ramp tracks gamma 2.2
+4. **CMS (6-axis, guided)** — measures red, green, blue, cyan, magenta, and yellow and tells you which Hue / Saturation / Brightness control to change in the projector's RGBCMY menu (the 5040UB has no network commands for CMS), re-measuring after each adjustment
+5. **Verification** — final measurement pass over white, the six colors, and a 10–90% grey ramp, with no corrections applied
+
+Turn **Auto Iris** off in the projector's Image menu before calibrating — it can't be controlled over the network and changes light output between patches.
 
 Supports both **SDR (Rec.709/D65)** and **HDR10 (DCI P3/D65)** targets. SDR and HDR settings on the projector are independent — calibrate each separately.
 
@@ -47,7 +51,7 @@ Supports both **SDR (Rec.709/D65)** and **HDR10 (DCI P3/D65)** targets. SDR and 
 
 - **Auto-discovery** — scans your network via mDNS and parallel port scan to find the projector and Pi without manual IP entry
 - **Command probe** — confirms the projector accepts the white-balance and picture-mode ESC/VP21 commands before first calibration
-- **Profile management** — save, apply, and compare calibration snapshots; swap between SDR and HDR10 profiles in seconds
+- **Profile management** — save, apply, and compare full picture-setting snapshots (color mode, brightness, contrast, gains, offsets, gamma, …); swap between SDR and HDR10 profiles in seconds
 - **Dry-run mode** — runs the full calibration loop without sending corrections, for testing and previewing
 - **Warm-up monitor** — tracks colorimeter Y readings over time and unlocks calibration only when the lamp is thermally stable
 - **AI analysis** — Claude-powered post-run report with grade, issues, and recommendations; live anomaly detection during measurement; natural-language profile comparison

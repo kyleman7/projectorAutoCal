@@ -36,6 +36,7 @@ def compare_profiles(profile_a: "CalibrationProfile", profile_b: "CalibrationPro
         dict with keys: narrative, delta_e_delta, verdict, notable_changes.
         Falls back to {"error": ..., "available": False} on failure.
     """
+    from ..picture import LABELS
     from .base import MODEL_OPUS, _agent_unavailable, request_structured
 
     def _fmt_wb(gains: dict) -> str:
@@ -60,6 +61,16 @@ def compare_profiles(profile_a: "CalibrationProfile", profile_b: "CalibrationPro
         b_val = profile_b.final_delta_e.get(patch)
         if a_val is not None and b_val is not None:
             de_delta[patch] = round(b_val - a_val, 4)
+
+    # Picture settings that differ (profiles saved before full snapshots have none)
+    changed = {
+        key: (profile_a.settings.get(key), profile_b.settings.get(key))
+        for key in sorted(set(profile_a.settings) | set(profile_b.settings))
+        if profile_a.settings.get(key) != profile_b.settings.get(key)
+    }
+    settings_diff = "\n".join(
+        f"  {LABELS.get(k, k)} ({k}): {a} → {b}" for k, (a, b) in changed.items()
+    ) or "  (none recorded, or identical)"
 
     prompt = f"""You are a professional display calibrator comparing two projector calibration profiles
 for an Epson Home Cinema 5040UB.
@@ -86,6 +97,9 @@ Profile B (comparison): "{profile_b.name}"
 
 ΔE change (B minus A, negative = improvement):
   {de_delta}
+
+Picture settings that differ (A → B):
+{settings_diff}
 
 Explain in plain language what changed between these calibrations and whether
 Profile B is better, worse, or similar to Profile A. Be specific about which

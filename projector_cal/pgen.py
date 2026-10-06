@@ -62,6 +62,10 @@ class PatchDisplay(Protocol):
         """Display a black patch (between measurements or at shutdown)."""
         ...
 
+    def display_window(self, window: RGBPatch, background: RGBPatch, size: float = 0.25) -> None:
+        """Display a centred box (`size` of each dimension) over a background."""
+        ...
+
     def connect(self) -> None:
         """Establish the connection to the patch display device."""
         ...
@@ -177,6 +181,14 @@ class PGenClient:
         """
         self.display_patch(RGBPatch(0, 0, 0))
 
+    def display_window(self, window: RGBPatch, background: RGBPatch, size: float = 0.25) -> None:
+        """Display a centred box over a background (guided levels patterns)."""
+        W, H = self._size
+        w, h = round(W * size), round(H * size)
+        self._send_patch(window, background, (w, h), ((W - w) // 2, (H - h) // 2))
+        if self.patch_settle_ms > 0:
+            time.sleep(self.patch_settle_ms / 1000.0)
+
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
@@ -216,13 +228,23 @@ class PGenClient:
         """Map a full-range 8-bit value to the Pi's output range."""
         return 16 + round(v * 219 / 255) if self._limited_range else v
 
-    def _send_patch(self, patch: RGBPatch) -> None:
-        """Send a full-screen rectangle; reconnect once on a dropped connection."""
+    def _send_patch(
+        self,
+        patch: RGBPatch,
+        background: RGBPatch | None = None,
+        size: tuple[int, int] | None = None,
+        position: tuple[int, int] = (0, 0),
+    ) -> None:
+        """Send a rectangle (full-screen by default); reconnect once on a dropped connection."""
         r, g, b = self._code(patch.r), self._code(patch.g), self._code(patch.b)
-        w, h = self._size
-        # Background matches the patch so any sizing mismatch is still full-field;
-        # PGenerator takes the background as r,b,g.
-        cmd = f"RGB=RECTANGLE;{w},{h};0;{r},{g},{b};{r},{b},{g};0,0,0,0;-1"
+        # Full-field default: background matches the patch so any sizing
+        # mismatch is still a uniform field
+        bg = background or patch
+        br, bg_g, bb = self._code(bg.r), self._code(bg.g), self._code(bg.b)
+        w, h = size or self._size
+        x, y = position
+        # PGenerator takes the background as r,b,g
+        cmd = f"RGB=RECTANGLE;{w},{h};0;{r},{g},{b};{br},{bb},{bg_g};0,0,{x},{y};-1"
         for attempt in range(2):
             try:
                 self._command(cmd)
@@ -255,6 +277,11 @@ class NullPatchDisplay:
 
     def display_black(self) -> None:
         self.display_patch(RGBPatch(0, 0, 0))
+
+    def display_window(self, window: RGBPatch, background: RGBPatch, size: float = 0.25) -> None:
+        logger.info("[NullPatchDisplay] window %s on %s", window, background)
+        if self.patch_settle_ms > 0:
+            time.sleep(self.patch_settle_ms / 1000.0)
 
     def __enter__(self) -> "NullPatchDisplay":
         self.connect()

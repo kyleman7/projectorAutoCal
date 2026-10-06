@@ -340,9 +340,11 @@
           <div class="field" style="flex:1; margin:0">
             <label>Phase</label>
             <select id="run-phase">
-              <option value="all">All (WB + guided CMS + Verify)</option>
-              <option value="wb">White Balance Only</option>
-              <option value="cms">Guided CMS Only</option>
+              <option value="all">All (levels → WB → gamma → CMS → verify)</option>
+              <option value="levels">Brightness / Contrast only (guided)</option>
+              <option value="wb">White Balance only (two-point)</option>
+              <option value="gamma">Gamma only (SDR)</option>
+              <option value="cms">CMS only (guided)</option>
             </select>
           </div>
           <div class="field" style="flex:1; margin:0">
@@ -360,10 +362,13 @@
         <div class="text-dim mb-16" style="font-size:12px; line-height:1.7">
           <strong>First time?</strong> Tick <em>Dry Run</em> to watch the full measure-and-correct
           loop without changing anything on the projector.
-          <em>All</em> runs the three phases in order: automatic white balance → guided color
-          correction (CMS) → a final verification pass. The 5040UB can't adjust CMS over the network,
-          so for each color the app tells you what to change in the projector's RGBCMY menu and
-          waits while you do it. The projector stores SDR and HDR10 settings separately,
+          Every run first records all picture settings and resets Color, Tint, Skin tone and
+          image processing to neutral. <em>All</em> then runs: guided brightness/contrast on test
+          patterns → automatic two-point white balance (gains on white, offsets on 30% grey) →
+          automatic gamma (the 9 custom-gamma points, SDR only) → guided color correction (CMS) →
+          a verification pass over white, the colors and a 10–90% grey ramp. The 5040UB can't adjust
+          CMS over the network, so for each color the app tells you what to change in the RGBCMY
+          menu and waits. <strong>Turn Auto Iris off</strong> in the projector's Image menu first. The projector stores SDR and HDR10 settings separately,
           so calibrate each mode in its own session.
         </div>
 
@@ -375,6 +380,14 @@
           </div>
           <div class="progress-bar"><div class="progress-fill" id="run-progress-fill" style="width:0%"></div></div>
         </div>
+      </div>
+
+      <!-- Guided levels step (brightness / contrast) -->
+      <div class="card hidden" id="manual-step">
+        <div class="card-title" id="manual-step-title"></div>
+        <ol id="manual-step-list" class="mb-16" style="margin-left:20px; line-height:1.8"></ol>
+        <div id="manual-step-controls" class="mb-16"></div>
+        <button class="btn btn-success" onclick="manualDone()">Done</button>
       </div>
 
       <!-- Guided CMS prompt (shown while the engine waits on the user) -->

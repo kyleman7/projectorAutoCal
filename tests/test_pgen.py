@@ -69,3 +69,11 @@ def test_rejects_a_server_that_is_not_pgenerator():
     fake = FakePGenerator(alive="NOPE")
     with pytest.raises(PGenError, match="not PGenerator"):
         PGenClient("127.0.0.1", fake.port).connect()
+
+
+def test_window_pattern_is_centred_over_background():
+    fake = FakePGenerator(quant_range="2")
+    with PGenClient("127.0.0.1", fake.port, patch_settle_ms=0) as pgen:
+        pgen.display_window(RGBPatch(5, 5, 5), RGBPatch(0, 0, 0), size=0.25)
+    # 960x540 box at (1440, 810) on a 3840x2160 black field
+    assert fake.patches()[0] == "RGB=RECTANGLE;960,540;0;5,5,5;0,0,0;0,0,1440,810;-1"

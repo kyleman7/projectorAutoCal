@@ -20,7 +20,14 @@ import pytest
 
 from projector_cal.color_math import D65_WHITE_XYZ, get_target_lab, xyY_to_XYZ
 from projector_cal.config import CalibrationConfig
-from projector_cal.engine import CalibrationEngine, _MAX_WORSENING_ITERATIONS, _gain_delta, cms_guidance
+from projector_cal.engine import (
+    _MAX_WORSENING_ITERATIONS,
+    _VERIFY_PATCHES,
+    CalibrationEngine,
+    _gain_delta,
+    cms_guidance,
+)
+from projector_cal.projector import ProjectorError
 
 from colormath.color_conversions import convert_color
 from colormath.color_objects import LabColor, XYZColor
@@ -40,10 +47,26 @@ def lab_to_xyz(L: float, a: float, b: float) -> tuple[float, float, float]:
 class FakeProjector:
     """Records WB gains and the hand-set CMS menu; the measure functions read them."""
 
-    def __init__(self, wb=None, cms=None):
+    def __init__(self, wb=None, cms=None, settings=None):
         self.wb = dict(wb or {"R": 128, "G": 128, "B": 128})
         self.cms = {axis: dict(cms or {"HUE": 0, "SAT": 0, "LUM": 0}) for axis in _CMS_AXES}
+        # Generic settings ("BRIGHT", "OFFSETR", "GAMMALV 03", …); anything
+        # absent is rejected like an unsupported token on the real projector
+        self.settings = dict(settings or {})
         self.set_calls = 0
+
+    def get_setting(self, token, param=None):
+        key = token if param is None else f"{token} {param}"
+        if key not in self.settings:
+            raise ProjectorError(f"ERR for {key}?")
+        return str(self.settings[key])
+
+    def set_setting(self, token, value, param=None):
+        key = token if param is None else f"{token} {param}"
+        if key not in self.settings:
+            raise ProjectorError(f"ERR for {key}")
+        self.settings[key] = value if isinstance(value, str) and not value.isdigit() else int(value)
+        self.set_calls += 1
 
     def get_wb_gain(self, ch):
         return self.wb[ch]
@@ -76,6 +99,9 @@ class FakeDisplay:
 
     def display_black(self):
         self.current = (0, 0, 0)
+
+    def display_window(self, window, background, size=0.25):
+        self.current = (window.r, window.g, window.b)
 
 
 def make_config(**overrides) -> CalibrationConfig:
@@ -115,7 +141,7 @@ class TestWhiteBalance:
             measure=wb_measure(proj, brightness=0.6),
             config=make_config(),
         )
-        result = engine._phase1_white_balance()
+        result, _ = engine._phase1_white_balance()
         assert result.converged
         assert result.iterations == 1
         assert result.final_delta_e < 1.0
@@ -129,7 +155,7 @@ class TestWhiteBalance:
             measure=wb_measure(proj),
             config=make_config(),
         )
-        result = engine._phase1_white_balance()
+        result, _ = engine._phase1_white_balance()
         assert result.converged, f"ΔE stayed at {result.final_delta_e}"
         assert result.final_delta_e < 1.0
         assert proj.wb["R"] < 150
@@ -160,7 +186,7 @@ class TestWhiteBalance:
             measure=stuck_measure,
             config=make_config(),
         )
-        result = engine._phase1_white_balance()
+        result, _ = engine._phase1_white_balance()
         assert not result.converged
         # Loop stopped early via the guard, not by exhausting max iterations
         assert result.iterations <= 2 + _MAX_WORSENING_ITERATIONS
@@ -175,9 +201,11 @@ class TestWhiteBalance:
             config=make_config(),
         )
         engine.abort()
-        report = engine.run_wb_only()
+        report = engine.run(["wb"])
         assert report.aborted
-        assert not report.wb_result.converged
+        assert report.wb_result is None  # the phase never started
+        assert not report.verify_results
+        assert proj.set_calls == 0
 
     def test_converges_on_quantized_projector(self):
         """Near the target the proportional delta shrinks to ±1, which the
@@ -192,7 +220,7 @@ class TestWhiteBalance:
                 config=make_config(wb_gain_min_step=min_step),
                 on_event=events.append,
             )
-            return engine._phase1_white_balance(), events
+            return engine._phase1_white_balance()[0], events
 
         stalled, _ = run(min_step=1)
         assert not stalled.converged  # the failure this guards against
@@ -301,13 +329,13 @@ class TestGuidedCMS:
     def test_remeasure_after_manual_fix_converges(self):
         proj = FakeProjector()
         events = []
-        engine = _guided_engine(proj, events, interactive_cms=True)
+        engine = _guided_engine(proj, events, interactive=True)
         out = {}
         t = threading.Thread(target=lambda: out.setdefault("r", engine._cms_axis("red")))
         t.start()
         _wait_for(lambda: any(e["event"] == "cms_guidance" for e in events))
         proj.cms["red"] = {"HUE": 5, "SAT": 5, "LUM": 2}   # user fixes it in the menu
-        engine.submit_cms_action("remeasure")
+        engine.submit_action("remeasure")
         t.join(timeout=5)
         assert not t.is_alive()
         assert out["r"].converged
@@ -317,13 +345,13 @@ class TestGuidedCMS:
     def test_next_accepts_without_remeasuring(self):
         proj = FakeProjector()
         events = []
-        engine = _guided_engine(proj, events, interactive_cms=True)
-        engine.submit_cms_action("remeasure")   # stale click from an earlier prompt
+        engine = _guided_engine(proj, events, interactive=True)
+        engine.submit_action("remeasure")   # stale click from an earlier prompt
         out = {}
         t = threading.Thread(target=lambda: out.setdefault("r", engine._cms_axis("red")))
         t.start()
         _wait_for(lambda: any(e["event"] == "cms_guidance" for e in events))
-        engine.submit_cms_action("next")
+        engine.submit_action("next")
         t.join(timeout=5)
         assert out["r"].iterations == 1
         assert not out["r"].converged
@@ -331,7 +359,7 @@ class TestGuidedCMS:
     def test_abort_releases_pending_wait(self):
         proj = FakeProjector()
         events = []
-        engine = _guided_engine(proj, events, interactive_cms=True)
+        engine = _guided_engine(proj, events, interactive=True)
         t = threading.Thread(target=engine._cms_axis, args=("red",))
         t.start()
         _wait_for(lambda: any(e["event"] == "cms_guidance" for e in events))
@@ -340,7 +368,7 @@ class TestGuidedCMS:
         assert not t.is_alive()
 
     def test_measures_white_reference_before_cms_only_run(self):
-        """run_cms_only must anchor relative colorimetry before measuring."""
+        """A CMS-only run must anchor relative colorimetry before measuring."""
         proj = FakeProjector()
         display = FakeDisplay()
 
@@ -416,7 +444,7 @@ class TestAnomalyHook:
             config=make_config(),
             anomaly_check=anomaly_check,
         )
-        result = engine._phase1_white_balance()
+        result, _ = engine._phase1_white_balance()
         assert calls, "anomaly hook was never invoked"
         assert result.iterations == 3  # fires on the 3rd iteration
 
@@ -432,7 +460,7 @@ class TestAnomalyHook:
             config=make_config(),
             anomaly_check=broken_hook,
         )
-        result = engine._phase1_white_balance()
+        result, _ = engine._phase1_white_balance()
         assert result.converged
 
 
@@ -465,13 +493,13 @@ class TestVerify:
             on_event=events.append,
         )
         results = engine._phase3_verify()
-        assert len(results) == 9
+        assert len(results) == len(_VERIFY_PATCHES) == 16
         for r in results:
             assert r.final_delta_e < 1.0, f"{r.patch_name}: ΔE={r.final_delta_e}"
         # Verify must drive the UI progress counter: one patch_start and one
         # patch_done per patch (CLAUDE.md pitfall #9)
-        assert sum(1 for e in events if e["event"] == "patch_start") == 9
-        assert sum(1 for e in events if e["event"] == "patch_done") == 9
+        assert sum(1 for e in events if e["event"] == "patch_start") == 16
+        assert sum(1 for e in events if e["event"] == "patch_done") == 16
 
     def test_report_serialization_has_no_infinity(self):
         """Aborted runs must not leak Infinity into the JSON report."""
@@ -485,6 +513,157 @@ class TestVerify:
             config=make_config(),
         )
         engine.abort()
-        report = engine.run_wb_only()
+        report = engine.run(["wb"])
         payload = _json.dumps(_report_to_dict(report))
         assert "Infinity" not in payload
+
+
+# ---- Baseline / levels / two-point WB / gamma ---------------------------------
+
+def _grey_level(display: FakeDisplay) -> float:
+    """Linear light (0–1) of the equal-RGB patch currently shown."""
+    return (display.current[1] / 255.0) ** 2.2
+
+
+class TestBaseline:
+    def test_records_settings_and_neutralizes(self):
+        proj = FakeProjector(settings={"CMODE": "07", "DENSITY": 140, "IMGPRESET": "03", "MCFI": "02"})
+        events = []
+        engine = CalibrationEngine(
+            projector=proj, display=FakeDisplay(), measure=wb_measure(proj),
+            config=make_config(), on_event=events.append,
+        )
+        report = engine.run([])
+        assert report.baseline == {"CMODE": "07", "DENSITY": "140", "IMGPRESET": "03", "MCFI": "02"}
+        assert proj.settings["DENSITY"] == "INIT"
+        assert proj.settings["IMGPRESET"] == 0 and proj.settings["MCFI"] == 0
+        assert proj.settings["CMODE"] == "07"  # record-only settings are untouched
+        baseline = next(e for e in events if e["event"] == "baseline")
+        assert set(baseline["neutralized"]) == {"DENSITY", "IMGPRESET", "MCFI"}
+
+    def test_dry_run_records_but_never_writes(self):
+        proj = FakeProjector(settings={"DENSITY": 140, "IMGPRESET": "03"})
+        engine = CalibrationEngine(
+            projector=proj, display=FakeDisplay(), measure=wb_measure(proj),
+            config=make_config(), dry_run=True,
+        )
+        report = engine.run([])
+        assert report.baseline["DENSITY"] == "140"
+        assert proj.set_calls == 0
+
+
+class TestLevels:
+    def test_adjust_steps_the_projector_then_done_moves_on(self):
+        proj = FakeProjector(settings={"BRIGHT": 128, "CONTRAST": 128})
+        events = []
+        engine = CalibrationEngine(
+            projector=proj, display=FakeDisplay(), measure=wb_measure(proj),
+            config=make_config(), on_event=events.append, interactive=True,
+        )
+        t = threading.Thread(target=engine._phase_levels)
+        t.start()
+
+        def steps(name):
+            return [e for e in events if e["event"] == "manual_step" and e["step"] == name]
+
+        _wait_for(lambda: steps("brightness"))
+        engine.submit_action("adjust", "BRIGHT", 1)
+        _wait_for(lambda: len(steps("brightness")) == 2)
+        assert steps("brightness")[-1]["controls"][0]["value"] == "129"
+        engine.submit_action("next")
+        _wait_for(lambda: steps("contrast"))
+        engine.submit_action("adjust", "BRIGHT", 1)   # not a control of this step: ignored
+        engine.submit_action("next")
+        t.join(timeout=5)
+        assert not t.is_alive()
+        assert proj.settings["BRIGHT"] == 129 and proj.settings["CONTRAST"] == 128
+        assert [e["step"] for e in events if e["event"] == "manual_step_done"] == ["brightness", "contrast"]
+
+
+def two_point_measure(proj: FakeProjector, display: FakeDisplay, brightness: float = 0.6):
+    """Gains scale each channel; offsets add a constant that dominates dark greys."""
+    def _measure():
+        v = _grey_level(display)
+        out = []
+        for ch, ref in zip("RGB", _D65):
+            gain = 1 + (proj.wb[ch] - 128) / 1024
+            offset = (proj.settings[f"OFFSET{ch}"] - 128) / 1024 * 0.2
+            out.append(ref * max(v * gain + offset, 1e-4) * brightness)
+        return tuple(out)
+    return _measure
+
+
+class TestTwoPointWhiteBalance:
+    def test_gains_fix_white_and_offsets_fix_dark_grey(self):
+        proj = FakeProjector(wb={"R": 140, "G": 128, "B": 120},
+                             settings={"OFFSETR": 110, "OFFSETG": 128, "OFFSETB": 140})
+        display = FakeDisplay()
+        engine = CalibrationEngine(
+            projector=proj, display=display, measure=two_point_measure(proj, display),
+            config=make_config(),
+        )
+        white, low = engine._phase1_white_balance()
+        assert white.converged, f"white ΔE {white.final_delta_e}"
+        assert low is not None and low.patch_name == "grey30"
+        assert low.converged, f"grey30 ΔE {low.final_delta_e}"
+        assert low.final_delta_e < low.initial_delta_e
+        assert proj.settings["OFFSETR"] > 110 and proj.settings["OFFSETB"] < 140
+
+    def test_without_offsets_falls_back_to_gain_only(self):
+        proj = FakeProjector(wb={"R": 150, "G": 128, "B": 118})
+        engine = CalibrationEngine(
+            projector=proj, display=FakeDisplay(), measure=wb_measure(proj),
+            config=make_config(),
+        )
+        white, low = engine._phase1_white_balance()
+        assert white.converged and low is None
+
+
+def gamma_measure(proj: FakeProjector, display: FakeDisplay, levels, brightness: float = 0.6):
+    """Neutral greys; each GAMMALV tone scales its grey's luminance (128 = 22% dark)."""
+    from projector_cal.color_math import get_target_xyY
+
+    def _measure():
+        r = display.current[1]
+        if r == 255:
+            Y = 100.0
+        else:
+            pct = round(r * 100 / 255)
+            target_Y = get_target_xyY(f"grey{pct}", "sdr")[2]
+            tone = levels.index(pct)
+            Y = target_Y * (1 + (proj.settings[f"GAMMALV {tone:02d}"] - 150) / 100)
+        return (_D65[0] / 100 * Y * brightness, Y * brightness, _D65[2] / 100 * Y * brightness)
+    return _measure
+
+
+class TestGamma:
+    def _projector(self, gamma="22"):
+        return FakeProjector(settings={"GAMMA": gamma, **{f"GAMMALV {i:02d}": 128 for i in range(9)}})
+
+    def test_points_converge_and_custom_gamma_is_selected(self):
+        proj = self._projector()
+        display = FakeDisplay()
+        cfg = make_config()
+        engine = CalibrationEngine(
+            projector=proj, display=display,
+            measure=gamma_measure(proj, display, cfg.gamma_tone_levels), config=cfg,
+        )
+        results = engine._phase_gamma()
+        assert proj.settings["GAMMA"] == "F0"
+        assert [r.patch_name for r in results] == [f"grey{p}" for p in cfg.gamma_tone_levels]
+        moved = 0
+        for tone, r in enumerate(results):
+            assert r.converged, f"{r.patch_name}: ΔE {r.final_delta_e}"
+            if r.initial_delta_e > 1.0:  # near black, 22% is still under 1 L*
+                assert proj.settings[f"GAMMALV {tone:02d}"] > 128, r.patch_name
+                moved += 1
+        assert moved >= 8
+
+    def test_skipped_in_hdr10(self):
+        proj = self._projector()
+        engine = CalibrationEngine(
+            projector=proj, display=FakeDisplay(), measure=wb_measure(proj),
+            config=make_config(), mode="hdr10",
+        )
+        assert engine._phase_gamma() == []
+        assert proj.set_calls == 0

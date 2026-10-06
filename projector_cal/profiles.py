@@ -1,8 +1,10 @@
 """Calibration profile save/load/apply/list/delete.
 
-A profile captures all WB gains and CMS values for one mode at one point in time,
-plus the final verification ΔE values. Applying a profile re-sends every command
-to the projector without re-running calibration.
+A profile captures the full picture state for one mode at one point in time (every
+setting in picture.PICTURE_SETTINGS — color mode, brightness, contrast, gains,
+offsets, gamma and custom gamma points, …) plus the final verification ΔE values.
+Applying a profile re-sends every setting to the projector without re-running
+calibration. CMS (RGBCMY) values can't be read or written over ESC/VP21.
 
 Profiles are stored as plain JSON files in the `profiles/` directory.
 File names: `{safe_name}_{mode}_{timestamp}.json`
@@ -19,6 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
+from . import picture
 from .projector import ProjectorClient
 
 logger = logging.getLogger(__name__)
@@ -36,6 +39,7 @@ class CalibrationProfile:
     cms_values: dict[str, dict]      # {"red": {"HUE": 0, "SAT": -3, "LUM": 2}, ...}
     final_delta_e: dict[str, float]  # {"white": 0.42, "red": 0.71, ...}
     screen_info: dict = field(default_factory=dict)  # size, gain, throw distance from wizard
+    settings: dict[str, str] = field(default_factory=dict)  # picture.read_settings snapshot
 
 
 def save_profile(profile: CalibrationProfile, directory: Path | None = None) -> Path:
@@ -89,6 +93,7 @@ def load_profile(path: Path) -> CalibrationProfile:
         cms_values=data["cms_values"],
         final_delta_e=data["final_delta_e"],
         screen_info=data.get("screen_info", {}),
+        settings=data.get("settings", {}),  # absent in profiles saved before full snapshots
     )
 
 
@@ -126,8 +131,8 @@ def delete_profile(path: Path) -> None:
     logger.info("Profile deleted: %s", path)
 
 
-def apply_profile(profile: CalibrationProfile, projector: ProjectorClient) -> None:
-    """Send all WB gain and CMS commands from a profile to the projector.
+def apply_profile(profile: CalibrationProfile, projector: ProjectorClient) -> list[str]:
+    """Send every stored picture setting from a profile to the projector.
 
     Does not re-run calibration — just re-applies the stored correction values.
     The projector must already be connected and in the correct picture mode.
@@ -135,18 +140,25 @@ def apply_profile(profile: CalibrationProfile, projector: ProjectorClient) -> No
     Args:
         profile: Profile whose values to apply.
         projector: Connected ProjectorClient.
+
+    Returns:
+        Setting keys the projector rejected (empty when everything applied).
     """
     logger.info(
         "Applying profile '%s' (mode=%s, created=%s)",
         profile.name, profile.mode, profile.created_at,
     )
 
-    # White balance gains
-    for ch in ("R", "G", "B"):
-        value = profile.wb_gains.get(ch)
-        if value is not None:
-            projector.set_wb_gain(ch, value)
-            logger.debug("Applied WB.%s = %d", ch, value)
+    failed: list[str] = []
+    if profile.settings:
+        failed = picture.apply_settings(projector, profile.settings)
+    else:
+        # Older profile: only white balance gains were recorded
+        for ch in ("R", "G", "B"):
+            value = profile.wb_gains.get(ch)
+            if value is not None:
+                projector.set_wb_gain(ch, value)
+                logger.debug("Applied WB.%s = %d", ch, value)
 
     # The 5040UB has no CMS commands over ESC/VP21 — RGBCMY values in older
     # profiles can only be re-entered by hand from the projector menu.
@@ -154,7 +166,11 @@ def apply_profile(profile: CalibrationProfile, projector: ProjectorClient) -> No
         logger.warning("Profile '%s' has CMS values; set them manually in the projector's "
                        "RGBCMY menu: %s", profile.name, profile.cms_values)
 
-    logger.info("Profile '%s' applied successfully.", profile.name)
+    if failed:
+        logger.warning("Profile '%s' applied except: %s", profile.name, failed)
+    else:
+        logger.info("Profile '%s' applied successfully.", profile.name)
+    return failed
 
 
 def profile_from_projector(
@@ -164,7 +180,7 @@ def profile_from_projector(
     final_delta_e: dict[str, float] | None = None,
     screen_info: dict | None = None,
 ) -> CalibrationProfile:
-    """Read the current WB gains from the projector and build a profile.
+    """Snapshot the projector's picture settings and build a profile.
 
     CMS (RGBCMY) values cannot be read over ESC/VP21, so cms_values is empty.
 
@@ -178,6 +194,7 @@ def profile_from_projector(
     Returns:
         CalibrationProfile populated with current projector state.
     """
+    settings = picture.read_settings(projector)
     wb_gains = {
         "R": projector.get_wb_gain("R"),
         "G": projector.get_wb_gain("G"),
@@ -192,6 +209,7 @@ def profile_from_projector(
         cms_values={},
         final_delta_e=final_delta_e or {},
         screen_info=screen_info or {},
+        settings=settings,
     )
 
 

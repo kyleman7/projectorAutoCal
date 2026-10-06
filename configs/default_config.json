@@ -28,7 +28,11 @@
     "wb_gain_min_step": 3,
     "proportional_gain_initial": 0.8,
     "proportional_gain_minimum": 0.1,
-    "cms_axis_order": ["red", "green", "blue", "cyan", "magenta", "yellow"]
+    "cms_axis_order": ["red", "green", "blue", "cyan", "magenta", "yellow"],
+    "wb_offset_patch": "grey30",
+    "wb_two_point_rounds": 3,
+    "gamma_tone_levels": [10, 20, 30, 40, 50, 60, 70, 80, 90],
+    "apply_baseline_neutral": true
   },
   "hdr": {
     "picture_mode_command": "PMOD",

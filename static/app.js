@@ -29,13 +29,25 @@ const setupState = {
   colorimeterAvailable: null,  // null = unknown, false = POSIX-only host problem
 };
 
+// Grey ramp measured by two-point WB, gamma and verification (matches color_math.GREY_RAMP)
+const GREY_RAMP = [90, 80, 70, 60, 50, 40, 30, 20, 10];
+
 const PATCH_COLORS = {
   white:   '#ffffff', red:    '#ff2020', green:  '#20dd20',
   blue:    '#2060ff', cyan:   '#00e8e8', magenta:'#ff00ff',
-  yellow:  '#ffee00', grey75: '#bfbfbf', grey50: '#808080',
+  yellow:  '#ffee00',
+  ...Object.fromEntries(GREY_RAMP.map(p => {
+    const hex = Math.round(p * 255 / 100).toString(16).padStart(2, '0');
+    return ['grey' + p, '#' + hex.repeat(3)];
+  })),
 };
 
-const PATCH_ORDER = ['white','red','green','blue','cyan','magenta','yellow','grey75','grey50'];
+const PATCH_ORDER = ['white','red','green','blue','cyan','magenta','yellow', ...GREY_RAMP.map(p => 'grey' + p)];
+
+const PHASE_LABELS = {
+  levels: 'Brightness / Contrast', wb: 'White Balance', gamma: 'Gamma',
+  cms: 'CMS', verify: 'Verification',
+};
 
 // ---------------------------------------------------------------------------
 // Tab routing
@@ -201,9 +213,7 @@ function handleEvent(ev) {
   switch (ev.event) {
     case 'patch_start':
       setPatchActive(ev.patch);
-      updatePhaseLabel(
-        ev.mode === 'wb' ? 'White Balance' : ev.mode === 'verify' ? 'Verification' : 'CMS',
-        ev.patch);
+      updatePhaseLabel(PHASE_LABELS[ev.mode] || ev.mode, ev.patch);
       break;
 
     case 'measurement':
@@ -228,10 +238,26 @@ function handleEvent(ev) {
       break;
 
     case 'phase_start':
-      logLine(`▶ Phase: ${ev.phase.toUpperCase()}`, 'log-info');
-      if (ev.phase === 'wb') state.totalPatches = 1;
-      else if (ev.phase === 'cms') state.totalPatches += 6;
-      else if (ev.phase === 'verify') state.totalPatches += 9;
+      logLine(`▶ Phase: ${PHASE_LABELS[ev.phase] || ev.phase}`, 'log-info');
+      state.totalPatches += ev.patch_count || 0;
+      updateProgress();
+      if (ev.phase === 'levels') updatePhaseLabel(PHASE_LABELS.levels, 'guided');
+      break;
+
+    case 'baseline': {
+      const n = Object.keys(ev.settings).length;
+      const neutral = Object.keys(ev.neutralized);
+      logLine(`Baseline: recorded ${n} picture settings` +
+              (neutral.length ? `; reset to neutral: ${neutral.join(', ')}` : ''), 'log-info');
+      break;
+    }
+
+    case 'manual_step':
+      showManualStep(ev);
+      break;
+
+    case 'manual_step_done':
+      hideManualStep();
       break;
 
     case 'phase_done':
@@ -731,18 +757,74 @@ function hideCmsGuide() {
   document.getElementById('cms-guide').classList.add('hidden');
 }
 
+async function runAction(body) {
+  await fetch('/api/run/action', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
 async function cmsAction(action) {
   // Disable until the next prompt so a double-click can't answer it too
   document.querySelectorAll('#cms-guide button').forEach(b => { b.disabled = true; });
-  await fetch('/api/run/cms-action', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action }),
+  await runAction({ action });
+}
+
+function showManualStep(ev) {
+  document.getElementById('manual-step-title').textContent = ev.title;
+  const list = document.getElementById('manual-step-list');
+  list.innerHTML = '';
+  ev.instructions.forEach(text => {
+    const li = document.createElement('li');
+    li.textContent = text;
+    list.appendChild(li);
   });
+  const controls = document.getElementById('manual-step-controls');
+  controls.innerHTML = '';
+  ev.controls.forEach(c => {
+    const row = document.createElement('div');
+    row.className = 'flex align-center gap-8 mb-8';
+    const label = document.createElement('span');
+    label.style.minWidth = '110px';
+    label.textContent = c.label;
+    const value = document.createElement('span');
+    value.className = 'text-mono';
+    value.style.minWidth = '40px';
+    value.textContent = c.value === null ? '?' : c.value;
+    const minus = document.createElement('button');
+    minus.className = 'btn btn-sm';
+    minus.textContent = '−';
+    minus.onclick = () => manualAdjust(c.token, -1);
+    const plus = document.createElement('button');
+    plus.className = 'btn btn-sm';
+    plus.textContent = '+';
+    plus.onclick = () => manualAdjust(c.token, 1);
+    row.append(label, minus, value, plus);
+    controls.appendChild(row);
+  });
+  document.querySelectorAll('#manual-step button').forEach(b => { b.disabled = false; });
+  document.getElementById('manual-step').classList.remove('hidden');
+}
+
+function hideManualStep() {
+  document.getElementById('manual-step').classList.add('hidden');
+}
+
+async function manualAdjust(token, direction) {
+  // Re-enabled when the engine re-sends the step with the new value
+  document.querySelectorAll('#manual-step button').forEach(b => { b.disabled = true; });
+  await runAction({ action: 'adjust', token, direction });
+}
+
+async function manualDone() {
+  document.querySelectorAll('#manual-step button').forEach(b => { b.disabled = true; });
+  await runAction({ action: 'next' });
 }
 
 function finishRun() {
   hideCmsGuide();
+  hideManualStep();
   document.getElementById('start-btn').classList.remove('hidden');
   document.getElementById('stop-btn').classList.add('hidden');
   document.querySelectorAll('.patch-cell').forEach(c => c.classList.remove('active'));
@@ -758,6 +840,8 @@ function renderResults(report) {
 
   const allPatches = [
     ...(report.wb_result ? [report.wb_result] : []),
+    ...(report.wb_offset_result ? [report.wb_offset_result] : []),
+    ...(report.gamma_results || []),
     ...report.cms_results,
     ...report.verify_results,
   ];

@@ -25,7 +25,7 @@ from pydantic import BaseModel
 
 from .config import ConfigError, load_command_table, load_config, load_config_from_dict
 from .discovery import NetworkDiscovery
-from .engine import CalibrationEngine, CalibrationReport
+from .engine import PHASES, CalibrationEngine, CalibrationReport
 from .pgen import NullPatchDisplay, PGenClient, PGenError, RGBPatch
 from .profiles import (
     CalibrationProfile,
@@ -72,9 +72,9 @@ class _ServerState:
         self._event_queue: asyncio.Queue = asyncio.Queue()
         self._loop: asyncio.AbstractEventLoop | None = None
         # AI agent settings — loaded from configs/ai_settings.json
-        # Last unanswered cms_guidance prompt — replayed to clients that
-        # connect (or reload) while the engine is waiting on the user
-        self.pending_cms_guidance: dict | None = None
+        # Last unanswered guided-step prompt (cms_guidance / manual_step) —
+        # replayed to clients that connect (or reload) while the engine waits
+        self.pending_prompt: dict | None = None
         self.ai_enabled: bool = False
         self._ai_api_key: str = ""  # never exposed via API; only stored in memory + file
 
@@ -84,10 +84,10 @@ class _ServerState:
     def broadcast_event(self, event: dict) -> None:
         """Thread-safe: put event into async queue from any thread."""
         kind = event.get("event")
-        if kind == "cms_guidance":
-            self.pending_cms_guidance = event
-        elif kind in ("patch_done", "run_complete", "error"):
-            self.pending_cms_guidance = None
+        if kind in ("cms_guidance", "manual_step"):
+            self.pending_prompt = event
+        elif kind in ("patch_done", "manual_step_done", "run_complete", "error"):
+            self.pending_prompt = None
         if self._loop is not None and not self._loop.is_closed():
             self._loop.call_soon_threadsafe(self._event_queue.put_nowait, event)
 
@@ -163,8 +163,8 @@ async def websocket_endpoint(ws: WebSocket) -> None:
     await ws.accept()
     _state._ws_clients.add(ws)
     logger.info("WebSocket client connected (%d total)", len(_state._ws_clients))
-    if _state.pending_cms_guidance is not None:
-        await ws.send_text(json.dumps(_state.pending_cms_guidance))
+    if _state.pending_prompt is not None:
+        await ws.send_text(json.dumps(_state.pending_prompt))
     try:
         while True:
             await ws.receive_text()  # keep alive; client messages ignored
@@ -237,7 +237,7 @@ async def run_probe() -> dict:
 
 class RunRequest(BaseModel):
     mode: Literal["sdr", "hdr10"] = "sdr"
-    phase: Literal["wb", "cms", "all"] = "all"
+    phase: Literal["all", "levels", "wb", "gamma", "cms"] = "all"
     dry_run: bool = False
 
 
@@ -352,16 +352,11 @@ async def start_run(body: RunRequest) -> dict:
                 dry_run=body.dry_run,
                 on_event=_state.broadcast_event,
                 anomaly_check=anomaly_check,
-                interactive_cms=True,
+                interactive=True,
             )
             _state._engine = engine
 
-            if body.phase == "all":
-                report = engine.run_all()
-            elif body.phase == "wb":
-                report = engine.run_wb_only()
-            else:
-                report = engine.run_cms_only()
+            report = engine.run(PHASES if body.phase == "all" else [body.phase])
 
             if _state.ai_enabled and not report.aborted:
                 try:
@@ -404,16 +399,24 @@ async def stop_run() -> dict:
     return {"ok": False, "message": "No calibration running"}
 
 
-class CmsActionRequest(BaseModel):
-    action: Literal["remeasure", "next"]
+class RunActionRequest(BaseModel):
+    action: Literal["remeasure", "next", "adjust"]
+    token: str | None = None          # adjust: setting to step (e.g. BRIGHT)
+    direction: Literal[-1, 1] = 1     # adjust: one notch down / up
 
 
-@app.post("/api/run/cms-action")
-async def cms_action(body: CmsActionRequest) -> dict:
-    """Answer a cms_guidance prompt: re-measure the axis, or accept it and move on."""
+@app.post("/api/run/action")
+async def run_action(body: RunActionRequest) -> dict:
+    """Answer a guided-step prompt.
+
+    cms_guidance: "remeasure" the axis, or "next" to accept it and move on.
+    manual_step: "adjust" a control one notch, or "next" when done.
+    """
     if _state._engine is None:
         raise HTTPException(409, detail="No calibration running")
-    _state._engine.submit_cms_action(body.action)
+    if body.action == "adjust" and not body.token:
+        raise HTTPException(422, detail="adjust needs a token")
+    _state._engine.submit_action(body.action, body.token, body.direction)
     return {"ok": True}
 
 
@@ -498,9 +501,9 @@ async def apply_profile_endpoint(filename: str) -> dict:
     proj_cfg = _state.config.projector
     try:
         with ProjectorClient.from_config(proj_cfg, command_table=_state.command_table) as proj:
-            apply_profile(profile, proj)
+            failed = apply_profile(profile, proj)
             _state.broadcast_event({"event": "profile_applied", "profile": profile.name})
-            return {"ok": True}
+            return {"ok": True, "failed": failed}
     except ProjectorError as e:
         raise HTTPException(500, detail=str(e))
 

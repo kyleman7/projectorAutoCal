@@ -90,13 +90,22 @@ def XYZ_to_xyY(X: float, Y: float, Z: float) -> tuple[float, float, float]:
     return (x, y, Y)
 
 
+# Grey ramp (percent of full scale) used by two-point WB, gamma and verification
+GREY_RAMP = (10, 20, 30, 40, 50, 60, 70, 80, 90)
+
+
+def _grey_code(pct: int) -> int:
+    """8-bit code for a grey at `pct` percent of full scale (50 → 128)."""
+    return round(pct * 255 / 100)
+
+
 def _grey_target_Y(code: int) -> float:
     """Luminance target (white=100) for an equal-RGB 8-bit patch code, gamma 2.2."""
     return ((code / 255.0) ** _GAMMA) * 100.0
 
 
 def _build_targets(primaries: dict[str, tuple[float, float, float]]) -> dict[str, tuple[float, float, float]]:
-    """Build the full 9-patch target table from a set of primaries.
+    """Build the full target table (white, primaries, secondaries, greys) from a set of primaries.
 
     Secondaries are derived by summing the XYZ of their two constituent primaries
     (additive display model) rather than hardcoded, so they are always consistent
@@ -115,7 +124,8 @@ def _build_targets(primaries: dict[str, tuple[float, float, float]]) -> dict[str
         Xb, Yb, Zb = xyY_to_XYZ(*primaries[b])
         targets[name] = XYZ_to_xyY(Xa + Xb, Ya + Yb, Za + Zb)
     targets["grey75"] = (*_D65_WHITE_xy, _grey_target_Y(191))
-    targets["grey50"] = (*_D65_WHITE_xy, _grey_target_Y(128))
+    for pct in GREY_RAMP:
+        targets[f"grey{pct}"] = (*_D65_WHITE_xy, _grey_target_Y(_grey_code(pct)))
     return targets
 
 
@@ -166,7 +176,7 @@ def get_target_xyY(patch_name: str, mode: Literal["sdr", "hdr10"]) -> tuple[floa
     """Return the xyY calibration target for a patch in the given mode.
 
     Args:
-        patch_name: One of: white, red, green, blue, cyan, magenta, yellow, grey75, grey50
+        patch_name: white, red, green, blue, cyan, magenta, yellow, grey75, grey10…grey90
         mode: "sdr" or "hdr10"
 
     Returns:
@@ -188,7 +198,7 @@ def get_target_lab(patch_name: str, mode: Literal["sdr", "hdr10"]) -> tuple[floa
     """Return the Lab calibration target for a patch in the given mode (D65 illuminant).
 
     Args:
-        patch_name: One of: white, red, green, blue, cyan, magenta, yellow, grey75, grey50
+        patch_name: white, red, green, blue, cyan, magenta, yellow, grey75, grey10…grey90
         mode: "sdr" or "hdr10"
 
     Returns:
@@ -212,7 +222,7 @@ def patch_rgb(patch_name: str) -> tuple[int, int, int]:
     Primaries and secondaries are at maximum saturation; neutrals use equal R=G=B.
 
     Args:
-        patch_name: Patch name (white, red, green, blue, cyan, magenta, yellow, grey75, grey50)
+        patch_name: Patch name (white, red, green, blue, cyan, magenta, yellow, grey75, grey10…grey90)
 
     Returns:
         (R, G, B) as integers in [0, 255]
@@ -236,5 +246,5 @@ _PATCH_RGB: dict[str, tuple[int, int, int]] = {
     "magenta": (255,   0, 255),
     "yellow":  (255, 255,   0),
     "grey75":  (191, 191, 191),
-    "grey50":  (128, 128, 128),
+    **{f"grey{pct}": (_grey_code(pct),) * 3 for pct in GREY_RAMP},
 }

@@ -226,7 +226,32 @@ the D65 axis with gamma-2.2 luminance.
 
 ## Calibration Engine — Phase Detail
 
-### Phase 1: White Balance
+Run order (`engine.run(phases)`): **Baseline → Levels → White Balance → Gamma →
+CMS → Verification**. Baseline and Verification always run; the others are
+selected by `POST /api/run` `phase` (`all` or a single phase).
+
+### Phase 0: Baseline
+
+Snapshot every setting in `picture.PICTURE_SETTINGS` (`report.baseline`, `baseline`
+event), then — unless dry-run — reset the settings that bias a calibration:
+Color saturation / Tint / Skin tone to `INIT` (factory neutral) and image
+enhancement preset / frame interpolation off. Auto Iris has no ESC/VP21 command,
+so the user is told to turn it off.
+
+### Levels: Brightness and Contrast (guided)
+
+Visual, on PGenerator window patterns (`display_window`): a 2 % grey box on black
+for brightness (lower until it vanishes, raise until just visible), a 98 % box on
+white for contrast (raise until it blends, lower until just visible). The UI's
+−/+ buttons step `BRIGHT` / `CONTRAST` through the engine (`picture.nudge`), and
+**Done** moves on.
+
+### Phase 1: White Balance (two-point)
+
+Gains at the top (white) and offsets at the bottom (`wb_offset_patch`, grey30)
+of the grey scale. Each also shifts the other point, so gain-then-offset rounds
+repeat (up to `wb_two_point_rounds`) until a round needs no correction at
+either. Both points use the same chromaticity loop, shown here for gains:
 
 Goal: make the white patch chromaticity match D65 (x=0.3127, y=0.3290).
 
@@ -257,7 +282,24 @@ for each iteration:
 The G channel acts as the luminance reference (its error is 0 by construction
 after normalization); adjusting R and B corrects tint without shifting overall
 brightness. The last white reading's Y becomes the reference white that anchors
-relative colorimetry in Phases 2 and 3.
+relative colorimetry in later phases. Corrections smaller than `wb_gain_min_step`
+are widened to it, and each value is read back after writing (the 5040UB
+quantizes to ~2.5-unit steps).
+
+### Gamma (SDR only)
+
+Select `GAMMA F0` (custom), re-measure white, then for each custom point
+`GAMMALV 00…08` run the shared loop on the grey in `gamma_tone_levels`
+(10 … 90 %). Readings are reduced to lightness only (Y on the white = 100 scale,
+placed on the neutral axis), so ΔE is the L* error against gamma 2.2:
+
+```
+delta = +round((L_target − L_meas) / 100 × step_scale × 255)   # min step applies
+```
+
+A higher GAMMALV value is assumed to brighten its tone; the divergence guard
+reverts if that's wrong. Skipped in HDR10, where the projector tone-maps PQ and
+a power-law target doesn't apply.
 
 ### Phase 2: CMS (6 axes, guided)
 
@@ -283,7 +325,7 @@ Hue +/- direction per axis is unknown, but the neighbor color is unambiguous.
 
 ### Phase 3: Verification
 
-Read-only measurement pass. Measures all 9 patches (white + 6 primaries/secondaries + grey75 + grey50). No corrections applied. Results go into `CalibrationReport.verify_results`.
+Read-only measurement pass. Measures 16 patches (white, 6 primaries/secondaries, and the grey ramp grey90 … grey10). No corrections applied. Results go into `CalibrationReport.verify_results`.
 
 Ends with `display_black()`.
 

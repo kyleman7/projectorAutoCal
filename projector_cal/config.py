@@ -100,6 +100,14 @@ class CalibrationConfig:
     cms_axis_order: list[str] = field(
         default_factory=lambda: ["red", "green", "blue", "cyan", "magenta", "yellow"]
     )
+    # Two-point white balance: offsets are tuned on this grey; gain/offset
+    # rounds repeat until neither point needs a correction
+    wb_offset_patch: str = "grey30"
+    wb_two_point_rounds: int = 3
+    # Grey level (percent) measured for each custom-gamma point GAMMALV 00–08
+    gamma_tone_levels: list[int] = field(default_factory=lambda: [10, 20, 30, 40, 50, 60, 70, 80, 90])
+    # Reset color/tint/skin tone and processing to neutral at the start of a run
+    apply_baseline_neutral: bool = True
 
     def __post_init__(self) -> None:
         if self.delta_e_threshold <= 0:
@@ -119,6 +127,14 @@ class CalibrationConfig:
             raise ConfigError(
                 "calibration.proportional_gain_minimum must be in (0, proportional_gain_initial]"
             )
+        if self.wb_offset_patch not in {f"grey{p}" for p in range(10, 100, 10)}:
+            raise ConfigError("calibration.wb_offset_patch must be grey10…grey90")
+        if self.wb_two_point_rounds < 1:
+            raise ConfigError("calibration.wb_two_point_rounds must be >= 1")
+        if len(self.gamma_tone_levels) != 9 or any(
+            p not in range(10, 100, 10) for p in self.gamma_tone_levels
+        ):
+            raise ConfigError("calibration.gamma_tone_levels must be 9 values from 10–90 (multiples of 10)")
         valid_axes = {"red", "green", "blue", "cyan", "magenta", "yellow"}
         for axis in self.cms_axis_order:
             if axis not in valid_axes:
@@ -255,6 +271,10 @@ def _build_config(data: dict) -> Config:
             cms_axis_order=list(
                 cal_raw.get("cms_axis_order", ["red", "green", "blue", "cyan", "magenta", "yellow"])
             ),
+            wb_offset_patch=str(cal_raw.get("wb_offset_patch", "grey30")),
+            wb_two_point_rounds=int(cal_raw.get("wb_two_point_rounds", 3)),
+            gamma_tone_levels=[int(v) for v in cal_raw.get("gamma_tone_levels", range(10, 100, 10))],
+            apply_baseline_neutral=bool(cal_raw.get("apply_baseline_neutral", True)),
         )
 
         hdr_raw = data.get("hdr", {})

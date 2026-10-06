@@ -41,8 +41,9 @@ D:\projectorAutoCal\
 │   ├── probe.py                   ← command token auto-discovery
 │   ├── colorimeter.py             ← ArgyllCMS spotread subprocess (POSIX only)
 │   ├── pgen.py                    ← PGenerator TCP adapter + NullPatchDisplay
-│   ├── engine.py                  ← calibration loop (phases 1-3)
-│   ├── profiles.py                ← save/load/apply/list/delete profiles
+│   ├── engine.py                  ← calibration phases (baseline, levels, WB, gamma, CMS, verify)
+│   ├── picture.py                 ← picture-setting registry: snapshot/restore/neutralize/nudge
+│   ├── profiles.py                ← save/load/apply/list/delete profiles (full settings snapshot)
 │   ├── discovery.py               ← mDNS + parallel port scan
 │   ├── server.py                  ← FastAPI app, REST + WebSocket
 │   └── agents/
@@ -55,7 +56,11 @@ D:\projectorAutoCal\
 └── tests/
     ├── __init__.py
     ├── test_config.py
-    └── test_color_math.py
+    ├── test_color_math.py
+    ├── test_engine.py
+    ├── test_picture.py
+    ├── test_pgen.py
+    └── test_probe.py
 ```
 
 ---
@@ -232,26 +237,57 @@ clamped to the initial value. A divergence guard (3 consecutive non-improving
 iterations → revert to best-known settings and stop the patch) protects against
 unstable loops and wrong control-direction assumptions.
 
-Phase 1 — White Balance:
-- Display white patch, adjust R/G/B gains toward D65 (each reading normalized to Y=100 → chromaticity-only ΔE)
+`engine.run(phases)` always runs **Baseline** first and **Verification** last; the
+requested phases run in between in canonical order `levels → wb → gamma → cms`
+(`engine.PHASES`). `POST /api/run` `phase` is `all` or one of those.
+
+Baseline (every run):
+- `picture.read_settings` snapshots every setting in `picture.PICTURE_SETTINGS`
+  (color mode, dynamic range, lamp power, brightness, contrast, color/tint/skin tone,
+  color temp, gains, offsets, gamma preset, 9 custom gamma points, processing) → `baseline` event, `report.baseline`
+- Unless dry-run (or `apply_baseline_neutral: false`): DENSITY/TINT/FCOLOR → `INIT`
+  (factory neutral), IMGPRESET and MCFI → `00` (off)
+- Auto Iris is not in Epson's command list — the UI and the levels step tell the user to turn it off
+
+Levels (guided brightness / contrast):
+- Brightness: 2% grey box on black (`display_window`); contrast: 98% box on white
+- Emits `manual_step` with instructions and the current control value; the UI's −/+ send
+  `POST /api/run/action {action: "adjust", token, direction}` and the engine steps the
+  projector with `picture.nudge` (writes until the quantized read-back changes), then
+  re-emits the step; `next` finishes it (`manual_step_done`). Dry run never writes
+
+Phase 1 — White Balance (two-point):
+- Gains on white, then offsets (`OFFSETR/G/B`) on `wb_offset_patch` (default grey30),
+  repeated up to `wb_two_point_rounds` (3) until a round needs no correction at either
+  point; falls back to gain-only if the projector rejects `OFFSETR?`
+- Each reading normalized to Y=100 → chromaticity-only ΔE against D65
 - G is the fixed reference channel (its error is 0 by construction); R and B move
-- `gain_delta = -round(channel_err × step_scale × gain_range)` where `channel_err = (meas − target) / target`
+- `delta = -round(channel_err × step_scale × gain_range)` where `channel_err = (meas − target) / target`
 - A nonzero delta smaller than `wb_gain_min_step` (default 3) is widened to it — the
   5040UB ignores ±1 writes, which would stall the loop and trip the divergence guard
-- After each write the gain is read back; the loop tracks what the projector stored
+- After each write the value is read back; the loop tracks what the projector stored
+
+Gamma (SDR only; skipped with a warning in HDR10, where the projector tone-maps PQ):
+- Sets `GAMMA F0` (custom), re-measures reference white, then tunes each `GAMMALV`
+  tone 00–08 against the grey in `gamma_tone_levels` (default 10…90%)
+- Readings are reduced to lightness (placed on the neutral axis) so ΔE = L* error vs
+  the gamma-2.2 target; `delta = +round((L_t − L_m)/100 × step_scale × 255)`, min step applies
+- Assumes a higher GAMMALV brightens its tone; the divergence guard reverts if not.
+  The tone ↔ grey-level mapping is an assumption (Epson doesn't document it) — configurable
 
 Phase 2 — CMS, guided (6 axes: red, green, blue, cyan, magenta, yellow):
 - The 5040UB has no CMS commands, so the user adjusts the RGBCMY menu by hand
 - Display each patch, measure; if ΔE ≥ threshold emit `cms_guidance` and block until
-  the user answers via `POST /api/run/cms-action` (`remeasure` or `next`); abort releases the wait
+  the user answers via `POST /api/run/action` (`remeasure` or `next`); abort releases the wait
 - Guidance (`engine.cms_guidance`), largest error first: hue as "shift toward <neighbor>"
   (Lab hue wheel red→yellow→green→cyan→blue→magenta; convention-free, since the menu's
   Hue +/- direction is unknown), saturation as chroma % low/high, brightness as L* low/high
 - No writes to the projector, no step decay, no divergence guard in this phase
-- Non-interactive engines (tests, `interactive_cms=False`) measure each axis once
+- Non-interactive engines (tests, `interactive=False`) measure each axis once
 
 Phase 3 — Verification:
-- Measure all 9 patches without applying corrections (white first — it re-anchors the reference)
+- Measure 16 patches without applying corrections: white (first — it re-anchors the
+  reference), the 6 colors, and the grey ramp grey90…grey10
 - Record final ΔE for report
 
 Convergence threshold: ΔE < 1.0 (configurable, default 1.0)
@@ -273,7 +309,11 @@ Max iterations per patch: 20 (configurable)
 All engine events are broadcast as JSON objects. Key events:
 
 ```json
-{"event": "phase_start",    "phase": "wb|cms|verify"}
+{"event": "phase_start",    "phase": "levels|wb|gamma|cms|verify", "patch_count": 9}
+{"event": "baseline",       "settings": {"CMODE": "07", "GAMMALV 03": "140", ...}, "neutralized": {"DENSITY": "INIT", ...}}
+{"event": "manual_step",    "step": "brightness|contrast", "title": "...", "instructions": ["..."],
+                            "controls": [{"token": "BRIGHT", "label": "Brightness", "value": "128"}]}
+{"event": "manual_step_done", "step": "brightness"}
 {"event": "patch_start",    "patch": "white", "iteration": 1, "mode": "wb|cms|verify"}
 {"event": "measurement",    "patch": "white", "xyz": [X,Y,Z], "delta_e": 0.42}
 {"event": "correction",     "patch": "white", "axis": "WB_R", "before": 128, "after": 131}
@@ -304,9 +344,9 @@ All engine events are broadcast as JSON objects. Key events:
 | GET    | `/api/config` | Return current config as JSON |
 | POST   | `/api/config` | Update config (body: `{config: {...}}`) |
 | POST   | `/api/probe` | Start probe in background thread |
-| POST   | `/api/run` | Start calibration (`{mode, phase, dry_run}`) |
+| POST   | `/api/run` | Start calibration (`{mode, phase: all\|levels\|wb\|gamma\|cms, dry_run}`) |
 | POST   | `/api/run/stop` | Send abort signal to engine |
-| POST   | `/api/run/cms-action` | Answer a `cms_guidance` prompt (`{action: "remeasure" \| "next"}`) |
+| POST   | `/api/run/action` | Answer a guided prompt: `{action: "remeasure"\|"next"}` for CMS, `{action: "adjust", token, direction: ±1}` or `"next"` for a manual step |
 | GET    | `/api/warmup` | Single colorimeter reading for warm-up monitor |
 | GET    | `/api/profiles` | List all saved profiles |
 | POST   | `/api/profiles` | Save current projector state as profile |
@@ -392,7 +432,9 @@ Results cached to `discovery/last_scan.json` (gitignored).
     "delta_e_threshold": 1.0, "max_iterations_per_patch": 20,
     "wb_gain_center": 128, "wb_gain_range": [0, 255], "wb_gain_min_step": 3,
     "proportional_gain_initial": 0.8, "proportional_gain_minimum": 0.1,
-    "cms_axis_order": ["red","green","blue","cyan","magenta","yellow"]
+    "cms_axis_order": ["red","green","blue","cyan","magenta","yellow"],
+    "wb_offset_patch": "grey30", "wb_two_point_rounds": 3,
+    "gamma_tone_levels": [10,20,30,40,50,60,70,80,90], "apply_baseline_neutral": true
   },
   "hdr": {
     "picture_mode_command": "PMOD", "hdr10_mode_value": "HDR4",
@@ -422,7 +464,7 @@ Results cached to `discovery/last_scan.json` (gitignored).
 
 8. **SDR and HDR settings are independent on 5040UB**: Calibrating in SDR does not affect HDR settings and vice versa. Run separate calibration sessions for each mode.
 
-9. **Phase 3 (verify) measures 9 patches** (white + 6 colors + grey75 + grey50). Phases 1 and 2 measure 1 and 6 patches respectively. The progress counter must account for all phases.
+9. **Progress counting comes from `phase_start.patch_count`**: WB 2 (white + offset grey; 1 if gain-only), gamma 9, CMS 6, verify 16, levels 0. Every patch the counter expects must get exactly one `patch_done` — WB rounds emit theirs once, after the last round.
 
 10. **Profile filenames**: Derived from `name_mode_timestamp.json`. The JS re-derives the filename client-side using the same Python logic — keep them in sync.
 
@@ -443,6 +485,10 @@ Results cached to `discovery/last_scan.json` (gitignored).
 18. **Gain writes are quantized** (~2.5 units): ±1 writes are accepted but change nothing. Keep `wb_gain_min_step` and the read-back after `set_wb_gain`.
 
 19. **Control4/AMX off ⇒ all settings ERR**: if the probe finds `PWR?` answering but no WB token, that is the cause — not wrong token names.
+
+20. **Epson stores image settings per color mode**: restoring a snapshot must set `CMODE` first, and `GAMMA` before the `GAMMALV` points (`picture.PICTURE_SETTINGS` order). Applying a snapshot in another order silently writes values into the wrong mode.
+
+21. **Unverified on hardware** (projector was offline when written): `GAMMALV? xx` reply format (handled with or without the parameter echoed), the tone ↔ grey-level mapping, that higher GAMMALV brightens, and `INIT` as the neutral value for DENSITY/TINT/FCOLOR. The divergence guard limits the damage if a direction is wrong.
 
 ---
 
@@ -473,9 +519,9 @@ python -m projector_cal
 | Tab | Key features |
 |-----|-------------|
 | **Setup** | Guided flow: workflow progress strip, then numbered steps — 1 connections (Save & Test persists fields via POST /api/config; the run reads the saved config, not the fields), 2 command probe, 3 screen info (optional), 4 placement checklist, 5 warm-up + pre-flight validation; AI settings card at the bottom. Step checkmarks driven by GET /api/setup/status + client state |
-| **Run** | Readiness banner (warns if command table unprobed or colorimeter unavailable on host), mode/phase selector with first-run guidance, dry-run toggle, start/stop (Start re-saves Setup fields first), guided-CMS card (instructions + Re-measure / Accept & next), patch grid with live ΔE, progress bar, live log |
+| **Run** | Readiness banner (warns if command table unprobed or colorimeter unavailable on host), mode/phase selector with first-run guidance, dry-run toggle, start/stop (Start re-saves Setup fields first), guided levels card (instructions, −/+ per control, Done), guided-CMS card (instructions + Re-measure / Accept & next), patch grid (white, colors, grey ramp) with live ΔE, progress bar, live log |
 | **Before/After** | ΔE comparison table (before = initial ΔE, after = verify pass), AI Analysis card (grade + issues + recommendations) |
-| **Profiles** | Grouped by mode, apply/delete buttons, save-current-state, AI profile comparison |
+| **Profiles** | Grouped by mode, apply/delete buttons, save-current-state (full picture-settings snapshot; apply restores it in dependency order — CMODE first, GAMMA before GAMMALV), AI profile comparison |
 
 All tabs receive real-time updates via WebSocket (`/ws`).
 
