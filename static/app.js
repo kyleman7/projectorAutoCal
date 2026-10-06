@@ -29,8 +29,13 @@ const setupState = {
   colorimeterAvailable: null,  // null = unknown, false = POSIX-only host problem
 };
 
-// Grey ramp measured by two-point WB, gamma and verification (matches color_math.GREY_RAMP)
-const GREY_RAMP = [90, 80, 70, 60, 50, 40, 30, 20, 10];
+// Grey ramp and saturation sweep (match color_math.GREY_RAMP / SAT_SWEEP)
+const GREY_RAMP = [95, 90, 80, 70, 60, 50, 40, 30, 20, 10, 5];
+const SAT_SWEEP = [25, 50, 75];
+const SWEEP_COLORS = {
+  red: [1, 0, 0], green: [0, 1, 0], blue: [0, 0, 1],
+  cyan: [0, 1, 1], magenta: [1, 0, 1], yellow: [1, 1, 0],
+};
 
 const PATCH_COLORS = {
   white:   '#ffffff', red:    '#ff2020', green:  '#20dd20',
@@ -40,9 +45,18 @@ const PATCH_COLORS = {
     const hex = Math.round(p * 255 / 100).toString(16).padStart(2, '0');
     return ['grey' + p, '#' + hex.repeat(3)];
   })),
+  ...Object.fromEntries(Object.entries(SWEEP_COLORS).flatMap(([c, m]) => SAT_SWEEP.map(s => {
+    const hex = m.map(on => Math.round(255 * (on ? 1 : (1 - s / 100) ** (1 / 2.2)))
+      .toString(16).padStart(2, '0')).join('');
+    return [`${c}_sat${s}`, '#' + hex];
+  }))),
 };
 
-const PATCH_ORDER = ['white','red','green','blue','cyan','magenta','yellow', ...GREY_RAMP.map(p => 'grey' + p)];
+const PATCH_ORDER = [
+  'white', 'red', 'green', 'blue', 'cyan', 'magenta', 'yellow',
+  ...GREY_RAMP.map(p => 'grey' + p),
+  ...Object.keys(SWEEP_COLORS).flatMap(c => SAT_SWEEP.map(s => `${c}_sat${s}`)),
+];
 
 const PHASE_LABELS = {
   levels: 'Brightness / Contrast', wb: 'White Balance', gamma: 'Gamma',
@@ -243,6 +257,11 @@ function handleEvent(ev) {
       state.totalPatches += ev.patch_count || 0;
       updateProgress();
       if (ev.phase === 'levels') updatePhaseLabel(PHASE_LABELS.levels, 'guided');
+      break;
+
+    case 'pass_done':
+      logLine(`Pass ${ev.pass}: ${ev.corrections} setting change(s)` +
+              (ev.corrections === 0 ? ' — settled' : ''), 'log-info');
       break;
 
     case 'baseline': {

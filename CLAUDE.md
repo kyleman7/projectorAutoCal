@@ -273,6 +273,14 @@ unstable loops and wrong control-direction assumptions.
 requested phases run in between in canonical order `levels → wb → gamma → cms`
 (`engine.PHASES`). `POST /api/run` `phase` is `all` or one of those.
 
+**Passes:** levels, WB and gamma move each other, so they repeat (`calibration_passes`,
+default 3) until a pass emits no `correction` event (`pass_done {pass, corrections}`); CMS
+runs once afterwards. The engine wraps `on_event` to count corrections and to collect
+`report.setting_changes` (`{axis: [first before, last after]}`).
+
+**Targets:** correction loops (WB, gamma, auto CMS) stop at `correction_target`
+(default config 0.5); verification pass/fail stays at `delta_e_threshold` (1.0).
+
 Baseline (every run):
 - `picture.read_settings` snapshots every setting in `picture.PICTURE_SETTINGS`
   (color mode, dynamic range, lamp power, brightness, contrast, color/tint/skin tone,
@@ -281,36 +289,47 @@ Baseline (every run):
   (factory neutral), IMGPRESET and MCFI → `00` (off)
 - Auto Iris is not in Epson's command list — the UI and the levels step tell the user to turn it off
 
-Levels (guided brightness / contrast):
-- Brightness: 2% grey box on black (`display_window`); contrast: 98% box on white
-- Emits `manual_step` with instructions and the current control value; the UI's −/+ send
-  `POST /api/run/action {action: "adjust", token, direction}` and the engine steps the
-  projector with `picture.nudge` (writes until the quantized read-back changes), then
-  re-emits the step; `next` finishes it (`manual_step_done`). Dry run never writes
+Levels (`levels_mode: "measured"`, default; dry runs and `"guided"` use the by-eye flow):
+- Brightness: measure black (code 0) and near-black (code 10, ~4%). Brightness shifts both,
+  so their difference is constant until the near-black patch sinks into black. Start `span`
+  notches above (6 on pass 1, 2 later), walk down while the difference keeps ≥ 80% of the
+  reference, keep the lowest such value
+- Contrast: measure 100% and 96% (code 245). Unclipped, Y96/Y100 = (245/255)^2.2; clipping
+  pushes it toward 1 and one channel clipping first shows as a 96%-vs-100% chromaticity
+  shift. Walk up while ratio ≤ gamma + 1% and shift ≤ ΔE 1.0 (or down if already clipping)
+- Room light raises black: the 2026-10-06 mode survey measured only ~160–280:1 on/off
+  contrast, so near-black judgements sit on an ambient-light floor
+- Guided flow: 2% box on black / 98% box on white (`display_window`), `manual_step` events,
+  UI −/+ → `POST /api/run/action {action: "adjust", token, direction}` → `picture.nudge`
 
 Phase 1 — White Balance (two-point):
+- Pass 1 (`ctemp_select`): gains reset to `wb_gain_ceiling` (126 = menu 50, neutral), then a
+  1-D search over the Color Temp preset (`CTEMP`, ~10 positions across 0–255 → `nudge` tries
+  up to 40 raw units) for the white nearest D65 — the gains then barely have to move
 - Gains on white, then offsets (`OFFSETR/G/B`) on `wb_offset_patch` (default grey30),
   repeated up to `wb_two_point_rounds` (3) until a round needs no correction at either
   point; falls back to gain-only if the projector rejects `OFFSETR?`
 - Each reading normalized to Y=100 → chromaticity-only ΔE against D65
-- G is the fixed reference channel (its error is 0 by construction); R and B move
 - `delta = -round(channel_err × step_scale × gain_range)` where `channel_err = (meas − target) / target`
+- `wb_maximize_light`: after each gain correction all three shift so the strongest channel
+  sits at `wb_gain_ceiling` — white comes from lowering the others, never from dimming all
+  (first real run, without it: R 126→96, B 108→86 with G fixed at 111)
 - A nonzero delta smaller than `wb_gain_min_step` (default 3) is widened to it — the
   5040UB ignores ±1 writes, which would stall the loop and trip the divergence guard
 - After each write the value is read back; the loop tracks what the projector stored
 
 Gamma (SDR only; skipped with a warning in HDR10, where the projector tone-maps PQ):
-- Sets `GAMMA F0` (custom), re-measures reference white, then for each `[grey %, tone]`
-  in `gamma_points` tunes `GAMMALV <tone>` against that grey's gamma-2.2 target
-- Tone ↔ grey map, measured on the 5040UB (+30 units, SDR forced): 00 and 08 barely
-  move 10–90% (curve ends); 01→10%; 02→10% & 20%; 03→20% (and 10% −14%); 04→30%;
-  05→40% (and 50–60% −8%); 06→50% & 60%; 07→70–80% (weak, +4%). Default
-  `gamma_points`: `[[10,1],[20,3],[30,4],[40,5],[50,6],[80,7]]` — 60/70/90% are verified only
-- Neighbouring tones interact, so the set repeats up to `gamma_passes` (2) until a pass
-  needs no correction; reported results come from the last pass
-- Readings are reduced to lightness (placed on the neutral axis) so ΔE = L* error vs
-  the target; `delta = +round((L_t − L_m)/100 × step_scale × 255)`, min step applies;
-  higher GAMMALV brightens (verified)
+- Sets `GAMMA F0` (custom); fits all 9 `GAMMALV` tones together to the 11-grey ramp
+  (`GREY_RAMP` 5, 10…90, 95 — 5% and 95% reach the curve's end tones 00 and 08)
+- Jacobian dL*/dunit (11 × 9) measured once per run: each tone bumped by 20, ramp re-read,
+  restored (~10 min). Then per iteration: measure white + ramp, solve the damped least
+  squares `(JᵀJ + 0.02·mean(diag JᵀJ)·I) Δ = Jᵀe` for all tones (clip ±15, drop |Δ|<1.5),
+  write, re-measure, Broyden-update J. Stops at `correction_target` (per-grey ΔL as
+  CIEDE2000), when no tone can move a full step, or reverts to the best tones after 3
+  non-improving iterations. Later passes reuse J
+- Measured on the 5040UB (+30 units): tones 01–07 sit roughly 10% apart from black and
+  overlap; 05 pulls 50–60% down; 07 is weak (+4% at 70–80%). Reviewers called the custom
+  curve "mostly ineffective" — the measurements show it works, just with overlap
 
 Phase 2 — CMS (6 axes: red, green, blue, cyan, magenta, yellow). The 5040UB has no CMS
 commands, so `calibration.cms_mode` picks how:
@@ -344,8 +363,10 @@ Guided (`"guided"`, dry runs, or no menu driver):
 - Non-interactive engines (tests, `interactive=False`) measure each axis once
 
 Phase 3 — Verification:
-- Measure 16 patches without applying corrections: white (first — it re-anchors the
-  reference), the 6 colors, and the grey ramp grey90…grey10
+- Measure 36 patches without applying corrections: white (first — it re-anchors the
+  reference), the 6 colors, the grey ramp grey95…grey5, and 25/50/75% saturation sweeps of
+  each color (`red_sat50`: the colour blended with white in linear light — 1 on its own
+  channels, 1 − sat on the others, gamma-2.2 encoded; target from the same additive model)
 - Record final ΔE for report
 
 Convergence threshold: ΔE < 1.0 (configurable, default 1.0)
@@ -497,7 +518,8 @@ Results cached to `discovery/last_scan.json` (gitignored).
     "proportional_gain_initial": 0.8, "proportional_gain_minimum": 0.1,
     "cms_axis_order": ["red","green","blue","cyan","magenta","yellow"],
     "wb_offset_patch": "grey30", "wb_two_point_rounds": 3,
-    "gamma_points": [[10,1],[20,3],[30,4],[40,5],[50,6],[80,7]], "gamma_passes": 2, "cms_mode": "auto",
+    "correction_target": 0.5, "calibration_passes": 3, "levels_mode": "measured",
+    "ctemp_select": true, "wb_maximize_light": true, "wb_gain_ceiling": 126, "cms_mode": "auto",
     "apply_baseline_neutral": true,
     "hdr_white_nits": 100
   },
@@ -529,7 +551,7 @@ Results cached to `discovery/last_scan.json` (gitignored).
 
 8. **SDR and HDR settings are independent on 5040UB**: Calibrating in SDR does not affect HDR settings and vice versa. Run separate calibration sessions for each mode.
 
-9. **Progress counting comes from `phase_start.patch_count`**: WB 2 (white + offset grey; 1 if gain-only), gamma 9, CMS 6, verify 16, levels 0. Every patch the counter expects must get exactly one `patch_done` — WB rounds emit theirs once, after the last round.
+9. **Progress counting comes from `phase_start.patch_count`**: WB 2 (white + offset grey; 1 if gain-only), gamma 11, CMS 6, verify 36, levels 0 — per pass, so the bar grows with each pass. Every patch the counter expects must get exactly one `patch_done` — WB rounds emit theirs once, after the last round.
 
 10. **Profile filenames**: Derived from `name_mode_timestamp.json`. The JS re-derives the filename client-side using the same Python logic — keep them in sync.
 

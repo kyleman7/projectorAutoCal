@@ -114,6 +114,11 @@ def make_config(**overrides) -> CalibrationConfig:
         proportional_gain_initial=0.8,
         proportional_gain_minimum=0.1,
         cms_axis_order=["red"],
+        # Features with their own tests below stay off for the basic loop tests
+        levels_mode="guided",
+        ctemp_select=False,
+        wb_maximize_light=False,
+        calibration_passes=1,
     )
     defaults.update(overrides)
     return CalibrationConfig(**defaults)
@@ -494,13 +499,13 @@ class TestVerify:
             on_event=events.append,
         )
         results = engine._phase3_verify()
-        assert len(results) == len(_VERIFY_PATCHES) == 16
+        assert len(results) == len(_VERIFY_PATCHES) == 36   # white, 6 colors, 11 greys, 18 sweeps
         for r in results:
             assert r.final_delta_e < 1.0, f"{r.patch_name}: ΔE={r.final_delta_e}"
         # Verify must drive the UI progress counter: one patch_start and one
         # patch_done per patch (CLAUDE.md pitfall #9)
-        assert sum(1 for e in events if e["event"] == "patch_start") == 16
-        assert sum(1 for e in events if e["event"] == "patch_done") == 16
+        assert sum(1 for e in events if e["event"] == "patch_start") == 36
+        assert sum(1 for e in events if e["event"] == "patch_done") == 36
 
     def test_report_serialization_has_no_infinity(self):
         """Aborted runs must not leak Infinity into the JSON report."""
@@ -620,77 +625,69 @@ class TestTwoPointWhiteBalance:
         assert white.converged and low is None
 
 
-def gamma_measure(proj: FakeProjector, display: FakeDisplay, points, brightness: float = 0.6):
-    """Neutral greys; each tuned grey's GAMMALV tone scales its luminance (128 = 22% dark)."""
-    tone_for = {grey: tone for grey, tone in points}
+# Simulated custom-gamma response, shaped like the measured 5040UB: each tone
+# raises the greys near its position and pulls one neighbour slightly the other
+# way. Rows: greys of GREY_RAMP; columns: tones 0–8; value: fractional luminance
+# change per GAMMALV unit.
+_RAMP = (5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 95)
+_TONE_POS = {0: 5, 1: 10, 2: 15, 3: 20, 4: 30, 5: 40, 6: 55, 7: 75, 8: 95}
+
+
+def _gamma_effect(grey: int, tone: int) -> float:
+    d = abs(grey - _TONE_POS[tone])
+    effect = 0.008 * math.exp(-(d / 8.0) ** 2)
+    if tone == 5 and grey in (50, 60):
+        effect -= 0.003                       # the 5040UB's tone 05 pulls 50–60 % down
+    return effect
+
+
+def gamma_measure(proj: FakeProjector, display: FakeDisplay, brightness: float = 0.6, start=110):
+    """Neutral greys whose luminance follows the target scaled by the tones."""
     from projector_cal.color_math import get_target_xyY
 
     def _measure():
-        r = display.current[1]
-        if r == 255:
+        code = display.current[1]
+        if code == 255:
             Y = 100.0
         else:
-            pct = round(r * 100 / 255)
-            target_Y = get_target_xyY(f"grey{pct}", "sdr")[2]
-            tone = tone_for.get(pct)
-            factor = 1 + (proj.settings[f"GAMMALV {tone:02d}"] - 150) / 100 if tone is not None else 1
-            Y = target_Y * factor
+            pct = min(_RAMP, key=lambda p: abs(round(p * 255 / 100) - code))
+            factor = 1 + sum(_gamma_effect(pct, t) * (proj.settings[f"GAMMALV {t:02d}"] - 128)
+                             for t in range(9))
+            Y = get_target_xyY(f"grey{pct}", "sdr")[2] * max(factor, 0.05)
         return (_D65[0] / 100 * Y * brightness, Y * brightness, _D65[2] / 100 * Y * brightness)
     return _measure
 
 
 class TestGamma:
-    def _projector(self, gamma="22"):
-        return FakeProjector(settings={"GAMMA": gamma, **{f"GAMMALV {i:02d}": 128 for i in range(9)}})
+    def _projector(self, gamma="22", start=110):
+        return FakeProjector(settings={"GAMMA": gamma, **{f"GAMMALV {i:02d}": start for i in range(9)}})
 
-    def test_points_converge_and_custom_gamma_is_selected(self):
-        proj = self._projector()
+    def test_all_nine_points_solved_together(self):
+        proj = self._projector()                     # every tone 18 units low → ramp too dark
         display = FakeDisplay()
-        cfg = make_config()
-        engine = CalibrationEngine(
-            projector=proj, display=display,
-            measure=gamma_measure(proj, display, cfg.gamma_points), config=cfg,
-        )
+        engine = CalibrationEngine(projector=proj, display=display,
+                                   measure=gamma_measure(proj, display), config=make_config())
         results = engine._phase_gamma()
         assert proj.settings["GAMMA"] == "F0"
-        assert [r.patch_name for r in results] == [f"grey{g}" for g, _ in cfg.gamma_points]
-        moved = 0
-        for (grey, tone), r in zip(cfg.gamma_points, results):
-            assert r.converged, f"{r.patch_name}: ΔE {r.final_delta_e}"
-            if r.initial_delta_e > 1.0:  # near black, 22% is still under 1 L*
-                assert proj.settings[f"GAMMALV {tone:02d}"] > 128, r.patch_name
-                moved += 1
-        assert moved >= len(cfg.gamma_points) - 1
-        # Untuned tones (curve ends) are never written
-        assert proj.settings["GAMMALV 00"] == 128 and proj.settings["GAMMALV 08"] == 128
+        assert [r.patch_name for r in results] == [f"grey{g}" for g in _RAMP]
+        for r in results:
+            assert r.final_delta_e < 1.0, f"{r.patch_name}: ΔE {r.final_delta_e}"
+        assert engine._gamma_J is not None and engine._gamma_J.shape == (11, 9)
+        # The top end point (tone 08, only reachable via 95 %) was used too
+        assert proj.settings["GAMMALV 08"] != 110
 
-    def test_second_pass_rechecks_points_disturbed_by_neighbours(self):
-        """Tone 03 also drags 10% grey down (as on the real projector), after
-        10% was already tuned; only a second pass brings 10% back."""
-        from projector_cal.color_math import delta_e_2000, get_target_lab, xyz_to_lab
-
-        def final_grey10_de(passes):
-            proj = self._projector()
-            display = FakeDisplay()
-            cfg = make_config(gamma_points=[[10, 1], [20, 3]], gamma_passes=passes)
-            base = gamma_measure(proj, display, cfg.gamma_points)
-
-            def measure():
-                X, Y, Z = base()
-                if display.current[1] == round(10 * 255 / 100):
-                    k = 1 - (proj.settings["GAMMALV 03"] - 128) / 60   # neighbour interaction
-                    return (X * k, Y * k, Z * k)
-                return (X, Y, Z)
-
-            engine = CalibrationEngine(projector=proj, display=display, measure=measure, config=cfg)
-            engine._phase_gamma()
-            # Re-measure the projector's actual end state — not the loop's last reading
-            display.display_patch(engine._patch("grey10"))
-            Y = engine._to_relative(*measure())[1]
-            return delta_e_2000(xyz_to_lab(0.95047 * Y, Y, 1.08883 * Y), get_target_lab("grey10", "sdr"))
-
-        assert final_grey10_de(passes=1) > 1.0   # the failure this guards against
-        assert final_grey10_de(passes=2) < 1.0
+    def test_jacobian_is_reused_on_later_passes(self):
+        proj = self._projector()
+        display = FakeDisplay()
+        engine = CalibrationEngine(projector=proj, display=display,
+                                   measure=gamma_measure(proj, display), config=make_config())
+        engine._phase_gamma()
+        J = engine._gamma_J
+        calls = {"n": 0}
+        original = engine._measure_gamma_jacobian
+        engine._measure_gamma_jacobian = lambda *a, **k: calls.__setitem__("n", calls["n"] + 1) or original(*a, **k)
+        engine._phase_gamma()
+        assert calls["n"] == 0 and engine._gamma_J is not None and J is not None
 
     def test_skipped_in_hdr10(self):
         proj = self._projector()
@@ -831,3 +828,109 @@ class TestAutoCMS:
         assert len(sat_moves) <= 4          # not ground on until the iteration limit
         assert report.cms_at_limit == {"red": ["SAT"]}
         assert any(e["event"] == "warning" and "limit" in e["message"] for e in moves)
+
+
+# ---- Measured levels, Color Temp, max-light WB, passes -------------------------
+
+def levels_measure(proj: FakeProjector, display: FakeDisplay, white=60.0, floor=0.02):
+    """Brightness adds a black offset (crushing below 130); Contrast scales
+    white, which clips at 70 cd/m²."""
+    def _measure():
+        code = display.current[1]
+        lin = (code / 255) ** 2.2
+        offset = (proj.settings["BRIGHT"] - 130) * 0.004
+        gain = 1 + (proj.settings["CONTRAST"] - 128) / 100
+        Y = max(floor, min(lin * white * gain, 70.0) + offset)
+        return (_D65[0] / 100 * Y, Y, _D65[2] / 100 * Y)
+    return _measure
+
+
+class TestMeasuredLevels:
+    def _engine(self, bright=136, contrast=136):
+        proj = FakeProjector(settings={"BRIGHT": bright, "CONTRAST": contrast})
+        display = FakeDisplay()
+        events = []
+        engine = CalibrationEngine(projector=proj, display=display, measure=levels_measure(proj, display),
+                                   config=make_config(levels_mode="measured"), on_event=events.append)
+        return engine, proj, events
+
+    def test_brightness_stops_just_before_near_black_crushes(self):
+        engine, proj, _ = self._engine(bright=136)
+        engine._tune_brightness(span=6)
+        # Black reaches its floor at 135; below that the near-black step shrinks.
+        # The search keeps ≥ 80 % of the step, i.e. stops within a few notches.
+        assert 132 <= proj.settings["BRIGHT"] <= 135
+
+    def test_contrast_rises_to_just_below_white_clipping(self):
+        engine, proj, _ = self._engine(contrast=136)
+        engine._tune_contrast(span=6)
+        assert 143 <= proj.settings["CONTRAST"] <= 146   # white clips from ~146
+
+    def test_contrast_backs_off_when_already_clipping(self):
+        engine, proj, _ = self._engine(contrast=152)
+        engine._tune_contrast(span=6)
+        assert proj.settings["CONTRAST"] <= 146
+
+    def test_changes_are_reported(self):
+        engine, proj, events = self._engine(bright=140)
+        engine._phase_levels()
+        axes = {e["axis"] for e in events if e["event"] == "correction"}
+        assert {"BRIGHT", "CONTRAST"} <= axes
+
+
+def ctemp_measure(proj: FakeProjector, brightness=0.6):
+    """White tinted by the Color Temp preset (D65 at 150) and scaled by gains."""
+    base = wb_measure(proj, brightness, gain_scale=512)
+
+    def _measure():
+        X, Y, Z = base()
+        t = (proj.settings["CTEMP"] - 150) / 300
+        return (X * (1 - t), Y, Z * (1 + t))
+    return _measure
+
+
+class TestColorTempAndMaxLight:
+    def test_picks_the_preset_nearest_d65_with_neutral_gains(self):
+        proj = FakeProjector(wb={"R": 100, "G": 111, "B": 90}, settings={"CTEMP": 100})
+        engine = CalibrationEngine(projector=proj, display=FakeDisplay(), measure=ctemp_measure(proj),
+                                   config=make_config(ctemp_select=True))
+        engine._select_ctemp()
+        assert abs(proj.settings["CTEMP"] - 150) <= 2
+        assert proj.wb == {"R": 126, "G": 126, "B": 126}    # gains reset to the ceiling first
+
+    def test_white_balance_keeps_the_strongest_gain_at_the_ceiling(self):
+        proj = FakeProjector(wb={"R": 140, "G": 128, "B": 118})
+        engine = CalibrationEngine(projector=proj, display=FakeDisplay(),
+                                   measure=wb_measure(proj, gain_scale=512),
+                                   config=make_config(wb_maximize_light=True))
+        white, _ = engine._phase1_white_balance()
+        assert white.converged
+        assert max(proj.wb.values()) == 126           # no channel dimmed needlessly
+
+    def test_without_max_light_green_stays_fixed(self):
+        proj = FakeProjector(wb={"R": 140, "G": 128, "B": 118})
+        engine = CalibrationEngine(projector=proj, display=FakeDisplay(),
+                                   measure=wb_measure(proj, gain_scale=512), config=make_config())
+        engine._phase1_white_balance()
+        assert proj.wb["G"] == 128
+
+
+class TestPasses:
+    def test_repeats_until_a_pass_changes_nothing(self):
+        proj = FakeProjector(wb={"R": 150, "G": 128, "B": 118})
+        events = []
+        engine = CalibrationEngine(projector=proj, display=FakeDisplay(), measure=wb_measure(proj),
+                                   config=make_config(calibration_passes=3), on_event=events.append)
+        report = engine.run(["wb"])
+        passes = [e for e in events if e["event"] == "pass_done"]
+        assert passes[0]["corrections"] > 0
+        assert passes[-1]["corrections"] == 0 and report.passes == len(passes) <= 3
+        assert report.setting_changes["WB_R"][0] == 150   # first 'before' kept
+
+    def test_correction_target_is_finer_than_pass_fail(self):
+        proj = FakeProjector(wb={"R": 150, "G": 128, "B": 118})
+        engine = CalibrationEngine(projector=proj, display=FakeDisplay(),
+                                   measure=wb_measure(proj, gain_scale=1024),
+                                   config=make_config(correction_target=0.5))
+        white, _ = engine._phase1_white_balance()
+        assert white.final_delta_e < 0.5

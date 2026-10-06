@@ -90,8 +90,23 @@ def XYZ_to_xyY(X: float, Y: float, Z: float) -> tuple[float, float, float]:
     return (x, y, Y)
 
 
-# Grey ramp (percent of full scale) used by two-point WB, gamma and verification
-GREY_RAMP = (10, 20, 30, 40, 50, 60, 70, 80, 90)
+# Grey ramp (percent of full scale) used by two-point WB, gamma and verification.
+# 5 and 95 % reach the custom-gamma curve's end points (tones 00 and 08).
+GREY_RAMP = (5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 95)
+
+# Saturation sweep (percent) verified for every primary/secondary: the colour
+# blended with white in linear light at full amplitude ("red_sat50").
+SAT_SWEEP = (25, 50, 75)
+_CHANNELS = {
+    "red": (1, 0, 0), "green": (0, 1, 0), "blue": (0, 0, 1),
+    "cyan": (0, 1, 1), "magenta": (1, 0, 1), "yellow": (1, 1, 0),
+}
+
+
+def _sweep_linear(color: str, sat_pct: int) -> tuple[float, float, float]:
+    """Linear RGB (0–1) of `color` at `sat_pct` saturation: 1 on the colour's
+    own channels, 1 − sat on the others (0 % = white, 100 % = the colour)."""
+    return tuple(1.0 if m else 1.0 - sat_pct / 100 for m in _CHANNELS[color])  # type: ignore[return-value]
 
 
 def _grey_code(pct: int) -> int:
@@ -126,7 +141,19 @@ def _build_targets(primaries: dict[str, tuple[float, float, float]]) -> dict[str
     targets["grey75"] = (*_D65_WHITE_xy, _grey_target_Y(191))
     for pct in GREY_RAMP:
         targets[f"grey{pct}"] = (*_D65_WHITE_xy, _grey_target_Y(_grey_code(pct)))
+    prim_xyz = [xyY_to_XYZ(*primaries[c]) for c in ("red", "green", "blue")]
+    for color in _CHANNELS:
+        for sat in SAT_SWEEP:
+            # Same 8-bit encoding the patch uses, so target and stimulus agree
+            lin = [(_sweep_code(v) / 255.0) ** _GAMMA for v in _sweep_linear(color, sat)]
+            X, Y, Z = (sum(l * p[i] for l, p in zip(lin, prim_xyz)) for i in range(3))
+            targets[f"{color}_sat{sat}"] = XYZ_to_xyY(X, Y, Z)
     return targets
+
+
+def _sweep_code(linear: float) -> int:
+    """8-bit code for a linear-light level under the display gamma."""
+    return round(255 * linear ** (1 / _GAMMA))
 
 
 _SDR_TARGETS_xyY = _build_targets(_SDR_PRIMARIES_xyY)
@@ -247,6 +274,8 @@ _PATCH_RGB: dict[str, tuple[int, int, int]] = {
     "yellow":  (255, 255,   0),
     "grey75":  (191, 191, 191),
     **{f"grey{pct}": (_grey_code(pct),) * 3 for pct in GREY_RAMP},
+    **{f"{c}_sat{s}": tuple(_sweep_code(v) for v in _sweep_linear(c, s))
+       for c in _CHANNELS for s in SAT_SWEEP},
 }
 
 

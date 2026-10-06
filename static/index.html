@@ -349,8 +349,8 @@
           <div class="field" style="flex:1; margin:0">
             <label>Phase</label>
             <select id="run-phase">
-              <option value="all">All (levels → WB → gamma → CMS → verify)</option>
-              <option value="levels">Brightness / Contrast only (guided)</option>
+              <option value="all">All (levels ⇄ WB ⇄ gamma → CMS → verify)</option>
+              <option value="levels">Brightness / Contrast only</option>
               <option value="wb">White Balance only (two-point)</option>
               <option value="gamma">Gamma only (SDR)</option>
               <option value="cms">CMS only</option>
@@ -372,13 +372,15 @@
           <strong>First time?</strong> Tick <em>Dry Run</em> to watch the full measure-and-correct
           loop without changing anything on the projector.
           Every run first records all picture settings and resets Color, Tint, Skin tone and
-          image processing to neutral. <em>All</em> then runs: guided brightness/contrast on test
-          patterns → automatic two-point white balance (gains on white, offsets on 30% grey) →
-          automatic gamma (the custom-gamma points, SDR only) → automatic color correction (CMS) →
-          a verification pass over white, the colors and a 10–90% grey ramp. The 5040UB has no CMS
-          network commands, so the app drives its RGBCMY menu with remote-control key presses (you'll
-          see the menu on screen — leave the remote alone while it runs). Dry runs, or
-          <code>cms_mode: "guided"</code>, instead tell you what to change and wait. <strong>Turn Auto Iris off</strong> in the projector's Image menu first. The projector stores SDR and HDR10 settings separately,
+          image processing to neutral. <em>All</em> then runs: Brightness and Contrast measured with
+          the colorimeter (lowest black before shadows crush, most light before white clips) →
+          Color Temp nearest D65 and two-point white balance keeping as much light as possible →
+          all 9 custom-gamma points solved together against a 5–95% grey ramp — repeated until a pass
+          changes nothing → automatic color correction (the app drives the RGBCMY menu with
+          remote-control key presses; leave the remote alone) → verification of white, the colors,
+          the grey ramp and 25/50/75% saturation sweeps. Corrections aim for ΔE 0.5; verification
+          passes at ΔE 1.0. <strong>Turn Auto Iris off</strong> in the projector's Image menu first and keep
+          the room dark. The projector stores SDR and HDR10 settings separately,
           so calibrate each mode in its own session.
         </div>
 

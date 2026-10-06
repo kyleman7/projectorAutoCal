@@ -3,12 +3,16 @@
 Phases, in run order:
   Baseline      — snapshot every picture setting, then neutralize the ones that
                   would bias a calibration (color/tint/skin tone, processing).
-  Levels        — guided: brightness and contrast set by eye on test patterns,
-                  with the user stepping the projector from the UI.
-  White Balance — two-point: R/B gains on white and R/B offsets on a dark grey,
-                  alternated until both points hit D65.
-  Gamma         — the 9 custom-gamma points (GAMMALV) tuned against a gamma-2.2
-                  grey ramp (SDR only).
+  Levels        — measured: Brightness at the lowest setting before near-black
+                  detail crushes, Contrast at the highest before white clips
+                  or tints (colorimeter). "guided" mode: by eye on patterns.
+  White Balance — Color Temp preset nearest D65 first, then two-point: gains
+                  on white (strongest channel kept at its ceiling for maximum
+                  light) and offsets on a dark grey, alternated until settled.
+  Gamma         — all 9 custom-gamma points solved together against the
+                  5–95 % grey ramp (measured Jacobian + Broyden updates; SDR).
+  Levels, White Balance and Gamma repeat (calibration_passes) until a pass
+  makes no change, since each moves the others.
   CMS           — the 5040UB exposes no RGBCMY commands over ESC/VP21. In
                   "auto" mode the engine drives the RGBCMY menu with remote-key
                   presses (osd.RgbcmyMenu) in a closed loop; in "guided" mode
@@ -26,12 +30,15 @@ from __future__ import annotations
 import logging
 import math
 import queue
+
+import numpy as np
 from dataclasses import dataclass, field
 from typing import Callable, Literal, Sequence
 
 from . import picture
 from .color_math import (
     GREY_RAMP,
+    SAT_SWEEP,
     delta_e_2000,
     hdr_patch_code10,
     pq_code10,
@@ -52,7 +59,23 @@ logger = logging.getLogger(__name__)
 PHASES = ("levels", "wb", "gamma", "cms")
 
 _CMS_PATCHES = ["red", "green", "blue", "cyan", "magenta", "yellow"]
-_VERIFY_PATCHES = ["white", *_CMS_PATCHES, *(f"grey{pct}" for pct in reversed(GREY_RAMP))]
+_VERIFY_PATCHES = [
+    "white", *_CMS_PATCHES, *(f"grey{pct}" for pct in reversed(GREY_RAMP)),
+    *(f"{c}_sat{s}" for c in _CMS_PATCHES for s in SAT_SWEEP),
+]
+
+# Measured levels: near-black step used to detect crushing, and the near-white
+# step used to detect clipping (8-bit full-range codes)
+_NEAR_BLACK_CODE = 10          # ~4 %: clearly above the black floor yet near it
+_NEAR_WHITE_CODE = 245         # ~96 %
+_CRUSH_KEEP = 0.8              # near-black step must keep 80 % of its unclipped size
+_CLIP_RATIO_TOL = 0.01         # near-white/white ratio may exceed gamma by 1 %
+_CLIP_CHROMA_DE = 1.0          # near-white vs white chromaticity difference allowed
+
+# Gamma solver
+_GAMMA_BUMP = 20               # units each tone is moved to measure its effect
+_GAMMA_MAX_STEP = 15           # largest change to one tone per iteration
+_GAMMA_RIDGE = 0.02            # damping, relative to the mean squared sensitivity
 
 # Consecutive non-improving iterations before a patch loop reverts to its
 # best-known settings and stops (protects against a wrong control-direction
@@ -127,6 +150,9 @@ class CalibrationReport:
     cms_adjustments: dict[str, dict[str, int]] = field(default_factory=dict)
     # Controls that hit a menu end stop (0/100) — their step counts overstate the travel
     cms_at_limit: dict[str, list[str]] = field(default_factory=dict)
+    # Every projector setting the run changed: {axis: [first before, last after]}
+    setting_changes: dict[str, list] = field(default_factory=dict)
+    passes: int = 0
     verify_results: list[PatchResult] = field(default_factory=list)
     total_iterations: int = 0
     aborted: bool = False
@@ -207,7 +233,7 @@ class CalibrationEngine:
         self.config = config
         self.mode = mode
         self.dry_run = dry_run
-        self.on_event = on_event
+        self._user_on_event = on_event
         self.anomaly_check = anomaly_check
         self.interactive = interactive
         self.cms_menu = cms_menu
@@ -215,6 +241,23 @@ class CalibrationEngine:
         self._abort = False
         self._ref_white_Y: float | None = None
         self._cms_at_limit: dict[str, set[str]] = {}
+        self._pass = 1
+        self._corrections = 0
+        self._setting_changes: dict[str, list] = {}
+        self._gamma_J: np.ndarray | None = None
+
+    def on_event(self, event: dict) -> None:
+        """Forward an event, tracking projector changes for passes and the report."""
+        if event.get("event") == "correction":
+            self._corrections += 1
+            entry = self._setting_changes.setdefault(event["axis"], [event["before"], event["after"]])
+            entry[1] = event["after"]
+        self._user_on_event(event)
+
+    @property
+    def _target(self) -> float:
+        """ΔE the correction loops aim for (finer than the pass/fail threshold)."""
+        return self.config.correction_target or self.config.delta_e_threshold
 
     def abort(self) -> None:
         """Signal the engine to stop after the current iteration."""
@@ -246,18 +289,33 @@ class CalibrationEngine:
         )
         report.baseline = self._phase0_baseline()
 
-        for phase in PHASES:
+        # Levels, WB and gamma each move the others: repeat them until a pass
+        # makes no change. Guided levels only prompt the user on the first pass.
+        tuning = [p for p in ("levels", "wb", "gamma") if p in phases]
+        for self._pass in range(1, (self.config.calibration_passes if tuning else 0) + 1):
             if self._abort:
                 break
-            if phase not in phases:
+            before = self._corrections
+            for phase in tuning:
+                if self._abort:
+                    break
+                if phase == "levels":
+                    self._phase_levels()
+                elif phase == "wb":
+                    report.wb_result, report.wb_offset_result = self._phase1_white_balance()
+                elif phase == "gamma":
+                    report.gamma_results = self._phase_gamma()
+            report.passes = self._pass
+            changes = self._corrections - before
+            logger.info("Pass %d made %d corrections", self._pass, changes)
+            self.on_event({"event": "pass_done", "pass": self._pass, "corrections": changes})
+            if changes == 0:
+                break
+
+        for phase in ("cms",):
+            if self._abort or phase not in phases:
                 continue
-            if phase == "levels":
-                self._phase_levels()
-            elif phase == "wb":
-                report.wb_result, report.wb_offset_result = self._phase1_white_balance()
-            elif phase == "gamma":
-                report.gamma_results = self._phase_gamma()
-            elif phase == "cms":
+            if phase == "cms":
                 report.cms_results = self._phase2_cms()
                 report.cms_at_limit = {a: sorted(c) for a, c in self._cms_at_limit.items() if c}
                 if self.cms_menu is not None:
@@ -267,6 +325,7 @@ class CalibrationEngine:
                     }
 
         report.total_iterations = sum(p.iterations for p in report.correction_results)
+        report.setting_changes = {k: v for k, v in self._setting_changes.items() if v[0] != v[1]}
         if not self._abort:
             report.verify_results = self._phase3_verify()
 
@@ -307,7 +366,7 @@ class CalibrationEngine:
                 projector (unless dry-run), and mutates `settings`.
         """
         cfg = self.config
-        threshold = cfg.delta_e_threshold
+        threshold = self._target
         step_scale = cfg.proportional_gain_initial
         initial_de: float | None = None
         final_de = float("inf")
@@ -447,8 +506,20 @@ class CalibrationEngine:
     # ------------------------------------------------------------------
 
     def _phase_levels(self) -> None:
+        measured = self.config.levels_mode == "measured" and not self.dry_run
+        if not measured and self._pass > 1:
+            return  # guided levels only ask the user once
         self.on_event({"event": "phase_start", "phase": "levels", "patch_count": 0})
-        logger.info("Levels (guided) [mode=%s]", self.mode)
+        logger.info("Levels (%s) [mode=%s, pass %d]", "measured" if measured else "guided",
+                    self.mode, self._pass)
+        if measured:
+            # First pass searches widely; later passes only re-check nearby
+            span = 6 if self._pass == 1 else 2
+            self._tune_brightness(span)
+            if not self._abort:
+                self._tune_contrast(span)
+            self.on_event({"event": "phase_done", "phase": "levels"})
+            return
         self._manual_step(
             "brightness", "Set Brightness (black level)",
             [_AUTO_IRIS_NOTE,
@@ -468,6 +539,107 @@ class CalibrationEngine:
                 _CONTRAST_PATTERN,
             )
         self.on_event({"event": "phase_done", "phase": "levels"})
+
+    def _measure_patch(self, patch: RGBPatch) -> tuple[float, float, float]:
+        self.display.display_patch(patch)
+        return self.measure()
+
+    def _step_setting(self, token: str, direction: int) -> int:
+        """Move a 0–255 setting one visible notch; emit the change; return the stored value."""
+        before = int(self.projector.get_setting(token))
+        after = picture.nudge(self.projector, token, direction)
+        if after != before:
+            self.on_event({"event": "correction", "patch": "levels", "axis": token,
+                           "before": before, "after": after})
+        return after
+
+    def _walk_to(self, token: str, value: int) -> None:
+        current = int(self.projector.get_setting(token))
+        while current != value and not self._abort:
+            moved = self._step_setting(token, 1 if value > current else -1)
+            if moved == current:
+                break
+            current = moved
+
+    def _tune_brightness(self, span: int) -> None:
+        """Lowest Brightness at which the near-black step survives (no crush).
+
+        Brightness shifts black and the near-black patch together, so their
+        difference stays put until the near-black patch starts sinking into
+        black. Starting `span` notches above, walk down while the difference
+        keeps ≥ _CRUSH_KEEP of its reference size.
+        """
+        def sample() -> tuple[float, float]:
+            y0 = self._measure_patch(self._grey_patch(0))[1]
+            yn = self._measure_patch(self._grey_patch(_NEAR_BLACK_CODE))[1]
+            return y0, yn - y0
+
+        start = int(self.projector.get_setting("BRIGHT"))
+        for _ in range(span):
+            self._step_setting("BRIGHT", +1)
+        y0, ref = sample()
+        current = int(self.projector.get_setting("BRIGHT"))
+        logger.info("Brightness reference %d: black %.4f, step %.4f cd/m²", current, y0, ref)
+        best = current
+        for _ in range(3 * span):
+            if self._abort:
+                break
+            moved = self._step_setting("BRIGHT", -1)
+            if moved == current:
+                break
+            current = moved
+            y0, d = sample()
+            logger.info("Brightness %d: black %.4f, step %.4f (%.0f%% of reference)",
+                        current, y0, d, 100 * d / ref if ref > 0 else 0)
+            if ref <= 0 or d < _CRUSH_KEEP * ref:
+                break
+            best = current
+        self._walk_to("BRIGHT", best)
+        logger.info("Brightness %d → %d", start, best)
+
+    def _tune_contrast(self, span: int) -> None:
+        """Highest Contrast at which near-white stays below white (no clip/tint).
+
+        Unclipped, Y(96 %)/Y(100 %) follows the gamma curve; as white clips the
+        ratio rises toward 1, and a channel clipping first shows up as a
+        chromaticity difference between the two.
+        """
+        expected = (_NEAR_WHITE_CODE / 255) ** 2.2
+
+        def clean() -> bool:
+            w = self._measure_patch(self._grey_patch(255))
+            n = self._measure_patch(self._grey_patch(_NEAR_WHITE_CODE))
+            ratio = n[1] / w[1] if w[1] > 1e-6 else 1.0
+            norm = lambda xyz: tuple(v * 100.0 / xyz[1] for v in xyz)  # noqa: E731
+            shift = delta_e_2000(xyz_to_lab(*norm(n)), xyz_to_lab(*norm(w)))
+            ok = ratio <= expected + _CLIP_RATIO_TOL and shift <= _CLIP_CHROMA_DE
+            logger.info("Contrast %s: white %.2f cd/m², 96%%/100%% %.4f (gamma %.4f), tint shift %.2f → %s",
+                        self.projector.get_setting("CONTRAST"), w[1], ratio, expected, shift,
+                        "clean" if ok else "clipping")
+            return ok
+
+        start = int(self.projector.get_setting("CONTRAST"))
+        current = start
+        if not clean():
+            for _ in range(3 * span):        # already clipping: back off
+                moved = self._step_setting("CONTRAST", -1)
+                if moved == current or self._abort:
+                    break
+                current = moved
+                if clean():
+                    break
+        else:
+            best = current
+            for _ in range(2 * span):         # find the top clean setting
+                moved = self._step_setting("CONTRAST", +1)
+                if moved == current or self._abort:
+                    break
+                current = moved
+                if not clean():
+                    break
+                best = current
+            self._walk_to("CONTRAST", best)
+        logger.info("Contrast %d → %s", start, self.projector.get_setting("CONTRAST"))
 
     def _manual_step(
         self,
@@ -533,6 +705,8 @@ class CalibrationEngine:
 
         low_patch = cfg.wb_offset_patch
         self.on_event({"event": "phase_start", "phase": "wb", "patch_count": 2 if has_offsets else 1})
+        if cfg.ctemp_select and self._pass == 1 and not self.dry_run:
+            self._select_ctemp()
         logger.info("Phase 1: White Balance [mode=%s, %s]", self.mode,
                     f"two-point, offsets on {low_patch}" if has_offsets else "gain only")
 
@@ -565,6 +739,58 @@ class CalibrationEngine:
             low_result = self._emit_patch_result(lo, low_patch)
         self.on_event({"event": "phase_done", "phase": "wb"})
         return white_result, low_result
+
+    def _white_chroma_de(self) -> float:
+        X, Y, Z = self._measure_patch(self._patch("white"))
+        s = 100.0 / Y if Y > 1e-6 else 1.0
+        return delta_e_2000(xyz_to_lab(X * s, Y * s, Z * s), get_target_lab("white", self.mode))
+
+    def _select_ctemp(self) -> None:
+        """Pick the Color Temp preset whose white is nearest D65 with neutral gains.
+
+        Starting the gains from a preset that is already close leaves them near
+        their ceiling, so less light is thrown away correcting white.
+        """
+        ceiling = self.config.wb_gain_ceiling
+        for ch in ("R", "G", "B"):
+            before = self.projector.get_wb_gain(ch)
+            if before != ceiling:
+                self.projector.set_wb_gain(ch, ceiling)
+                self.on_event({"event": "correction", "patch": "white", "axis": f"WB_{ch}",
+                               "before": before, "after": self.projector.get_wb_gain(ch)})
+        try:
+            start = int(self.projector.get_setting("CTEMP"))
+        except ProjectorError:
+            return
+        scores = {start: self._white_chroma_de()}
+        logger.info("Color Temp %d: white ΔE %.2f", start, scores[start])
+        for direction in (+1, -1):
+            if direction == -1:
+                self._walk_to("CTEMP", start)
+            current, worse = start, 0
+            while worse < 2 and not self._abort:
+                before = current
+                current = picture.nudge(self.projector, "CTEMP", direction)
+                if current == before:
+                    break
+                best_so_far = min(scores.values())
+                scores[current] = self._white_chroma_de()
+                logger.info("Color Temp %d: white ΔE %.2f", current, scores[current])
+                worse = worse + 1 if scores[current] >= best_so_far else 0
+        best = min(scores, key=scores.get)
+        self._walk_to_quiet("CTEMP", best)
+        if best != start:
+            self.on_event({"event": "correction", "patch": "white", "axis": "CTEMP",
+                           "before": start, "after": best})
+        logger.info("Color Temp %d → %d (white ΔE %.2f with neutral gains)", start, best, scores[best])
+
+    def _walk_to_quiet(self, token: str, value: int) -> None:
+        current = int(self.projector.get_setting(token))
+        while current != value:
+            moved = picture.nudge(self.projector, token, 1 if value > current else -1)
+            if moved == current:
+                break
+            current = moved
 
     def _wb_point(self, patch: str, kind: Literal["gain", "offset"]) -> _LoopOutcome:
         """Correct one grey-scale point's chromaticity with gains or offsets.
@@ -603,17 +829,25 @@ class CalibrationEngine:
             s = 100.0 / Y if Y > 1e-6 else 1.0
             return (X * s, Y * s, Z * s)
 
+        ceiling = cfg.wb_gain_ceiling
+
         def corrections(norm_xyz: tuple, meas_lab: tuple, current: dict, step_scale: float) -> dict:
             # Chromaticity correction — compare against the D65 target at the
-            # same (normalized) luminance; G acts as the fixed reference channel.
+            # same (normalized) luminance; G acts as the reference channel.
             Xn, Yn, Zn = norm_xyz
             r_err = (Xn - target_X) / max(target_X, 1e-6)
             g_err = (Yn - target_Y) / max(target_Y, 1e-6)
             b_err = (Zn - target_Z) / max(target_Z, 1e-6)
-            return {
-                ch: _clamp(current[ch] - _gain_delta(err, step_scale, gain_range, min_step), gain_lo, gain_hi)
+            new = {
+                ch: current[ch] - _gain_delta(err, step_scale, gain_range, min_step)
                 for ch, err in (("R", r_err), ("G", g_err), ("B", b_err))
             }
+            if kind == "gain" and cfg.wb_maximize_light:
+                # Shift all three so the strongest channel sits at the ceiling:
+                # white comes from lowering the others, never from dimming all
+                shift = ceiling - max(new.values())
+                new = {ch: v + shift for ch, v in new.items()}
+            return {ch: _clamp(v, gain_lo, gain_hi) for ch, v in new.items()}
 
         def apply(current: dict, new: dict) -> None:
             self._apply_settings(patch, current, new, names, put, read_back=get)
@@ -625,17 +859,18 @@ class CalibrationEngine:
     # ------------------------------------------------------------------
 
     def _phase_gamma(self) -> list[PatchResult]:
-        """Tune the custom-gamma points so the grey ramp tracks gamma 2.2.
+        """Solve all 9 custom-gamma points together against the grey ramp.
 
-        Each tuned grey is paired with the GAMMALV tone that moves it most
-        cleanly (cfg.gamma_points, measured on a 5040UB). Neighbouring tones
-        interact, so the set is repeated (cfg.gamma_passes) until a pass needs
-        no correction. Readings are reduced to lightness only — chromaticity
-        is the WB phase's job — so ΔE here is the L* error against the target.
+        Every tone moves several greys and neighbours interact (some pull the
+        other way), so the points are solved as one system: the Jacobian of
+        grey L* against each GAMMALV tone is measured once per run (each tone
+        bumped by _GAMMA_BUMP), then each iteration measures the ramp, solves
+        a damped least-squares step for all tones, applies it, and refines the
+        Jacobian with a Broyden update from what actually happened. Readings
+        are reduced to lightness — chromaticity is the WB phase's job.
         """
-        cfg = self.config
-        points = cfg.gamma_points
-        self.on_event({"event": "phase_start", "phase": "gamma", "patch_count": len(points)})
+        greys = list(GREY_RAMP)
+        self.on_event({"event": "phase_start", "phase": "gamma", "patch_count": len(greys)})
         results: list[PatchResult] = []
 
         if self.mode != "sdr":
@@ -651,70 +886,126 @@ class CalibrationEngine:
             self.on_event({"event": "phase_done", "phase": "gamma"})
             return results
 
-        logger.info("Gamma: tuning %d custom points [gamma preset was %s]", len(points), current_gamma)
         if current_gamma != picture.GAMMA_CUSTOM:
             self.on_event({"event": "correction", "patch": "gamma", "axis": "GAMMA",
                            "before": current_gamma, "after": picture.GAMMA_CUSTOM})
             if not self.dry_run:
                 self.projector.set_setting("GAMMA", picture.GAMMA_CUSTOM)
 
-        self._measure_white_reference()  # WB moved white since phase 1's reading
-        Xw, Yw, Zw = xyY_to_XYZ(*get_target_xyY("white", self.mode))
+        tones = list(range(picture.GAMMA_POINTS))
+        target_L = np.array([get_target_lab(f"grey{g}", self.mode)[0] for g in greys])
 
-        outcomes: dict[str, _LoopOutcome] = {}
-        first_de: dict[str, float | None] = {}
-        iterations: dict[str, int] = {}
-        for pass_no in range(1, cfg.gamma_passes + 1):
-            for pct, tone in points:
+        def read_tones() -> np.ndarray:
+            return np.array([int(self.projector.get_setting("GAMMALV", f"{t:02d}")) for t in tones], float)
+
+        def write_tone(t: int, value: int) -> int:
+            self.projector.set_setting("GAMMALV", value, f"{t:02d}")
+            return int(self.projector.get_setting("GAMMALV", f"{t:02d}"))
+
+        def ramp(iteration: int) -> tuple[np.ndarray, list]:
+            self._measure_white_reference()       # white drifts; re-anchor every ramp
+            Ls, xyzs = [], []
+            for g in greys:
                 if self._abort:
                     break
-                patch = f"grey{pct}"
-                o = self._gamma_point(tone, patch, (Xw / Yw, Zw / Yw))
-                outcomes[patch] = o
-                first_de.setdefault(patch, o.initial_de)
-                iterations[patch] = iterations.get(patch, 0) + o.iterations
-            settled = all(o.converged and o.iterations == 1 for o in outcomes.values())
-            logger.info("Gamma pass %d: %s", pass_no,
-                        {p: round(o.final_de, 2) for p, o in outcomes.items()})
-            if settled or self._abort:
-                break
+                patch = f"grey{g}"
+                self.on_event({"event": "patch_start", "patch": patch, "iteration": iteration, "mode": "gamma"})
+                xyz = self._measure_patch(self._patch(patch))
+                Y = self._to_relative(*xyz)[1]
+                L = _lightness(Y)
+                self.on_event({"event": "measurement", "patch": patch, "xyz": list(xyz),
+                               "delta_e": _l_de(L, target_L[len(Ls)])})
+                Ls.append(L)
+                xyzs.append(xyz)
+            return np.array(Ls), xyzs
 
-        for patch, o in outcomes.items():
-            o.initial_de, o.iterations = first_de[patch], iterations[patch]
-            results.append(self._emit_patch_result(o, patch))
+        values = read_tones()
+        L, xyzs = ramp(1)
+        if self._abort:
+            self.on_event({"event": "phase_done", "phase": "gamma"})
+            return results
+        initial_de = [_l_de(l, t) for l, t in zip(L, target_L)]
+
+        if self._gamma_J is None and not self.dry_run:
+            self._gamma_J = self._measure_gamma_jacobian(tones, values, L, ramp)
+        J = self._gamma_J if self._gamma_J is not None else np.zeros((len(greys), len(tones)))
+
+        best = (max(initial_de), values.copy(), L.copy(), list(xyzs))
+        worse = 0
+        iteration = 1
+        for iteration in range(2, self.config.max_iterations_per_patch + 2):
+            de = [_l_de(l, t) for l, t in zip(L, target_L)]
+            logger.info("Gamma iter %d: worst ΔL %.2f, tones %s", iteration - 1, max(de), values.astype(int).tolist())
+            if max(de) < self._target or self.dry_run or self._abort:
+                break
+            e = target_L - L
+            # Damped least squares for all tones at once
+            JtJ = J.T @ J
+            A = JtJ + _GAMMA_RIDGE * max(float(np.mean(np.diag(JtJ))), 1e-9) * np.eye(len(tones))
+            step = np.linalg.solve(A, J.T @ e)
+            step = np.clip(step, -_GAMMA_MAX_STEP, _GAMMA_MAX_STEP)
+            step[np.abs(step) < 1.5] = 0.0     # below the ~2.5-unit quantization
+            if not step.any():
+                logger.info("Gamma: remaining error is below one step of any point")
+                break
+            new_values = values.copy()
+            for t in tones:
+                if step[t]:
+                    target_v = int(np.clip(round(values[t] + step[t]), 0, 255))
+                    new_values[t] = write_tone(t, target_v)
+                    if new_values[t] != values[t]:
+                        self.on_event({"event": "correction", "patch": "gamma", "axis": f"GAMMA_{t + 1}",
+                                       "before": int(values[t]), "after": int(new_values[t])})
+            dv = new_values - values
+            values = new_values
+            L_new, xyzs = ramp(iteration)
+            if self._abort or not dv.any():
+                L = L_new if len(L_new) == len(L) else L
+                break
+            # Broyden: correct J along the move with what actually happened
+            J = J + np.outer((L_new - L) - J @ dv, dv) / float(dv @ dv)
+            L = L_new
+            worst = max(_l_de(l, t) for l, t in zip(L, target_L))
+            if worst < best[0]:
+                best, worse = (worst, values.copy(), L.copy(), list(xyzs)), 0
+            else:
+                worse += 1
+                if worse >= _MAX_WORSENING_ITERATIONS:
+                    logger.warning("Gamma not improving — reverting to best tones (worst ΔL %.2f)", best[0])
+                    for t in tones:
+                        if values[t] != best[1][t]:
+                            got = write_tone(t, int(best[1][t]))
+                            self.on_event({"event": "correction", "patch": "gamma", "axis": f"GAMMA_{t + 1}",
+                                           "before": int(values[t]), "after": got})
+                    values, L, xyzs = best[1].copy(), best[2], best[3]
+                    break
+        self._gamma_J = J
+
+        for g, l, t, xyz, de0 in zip(greys, L, target_L, xyzs, initial_de):
+            de = _l_de(l, t)
+            outcome = _LoopOutcome(final_de=de, initial_de=de0, iterations=iteration,
+                                   converged=de < self._target, xyz=tuple(xyz))
+            results.append(self._emit_patch_result(outcome, f"grey{g}"))
         self.on_event({"event": "phase_done", "phase": "gamma"})
         return results
 
-    def _gamma_point(self, tone: int, patch: str, white_ratios: tuple[float, float]) -> _LoopOutcome:
-        cfg = self.config
-        param = f"{tone:02d}"
-        target_lab = get_target_lab(patch, self.mode)
-        xw, zw = white_ratios
-
-        def get(_key: str) -> int:
-            return int(self.projector.get_setting("GAMMALV", param))
-
-        def put(_key: str, value: int) -> None:
-            self.projector.set_setting("GAMMALV", value, param)
-
-        values = {"V": get("V")}
-
-        def normalize(xyz: tuple[float, float, float]) -> tuple[float, float, float]:
-            # Relative luminance on the white=100 scale, placed on the neutral
-            # axis so the Lab comparison sees lightness error only
-            Y = self._to_relative(*xyz)[1]
-            return (xw * Y, Y, zw * Y)
-
-        def corrections(norm_xyz: tuple, meas_lab: tuple, current: dict, step_scale: float) -> dict:
-            # Assumes a higher GAMMALV value brightens its tone; if inverted,
-            # the divergence guard reverts instead of walking away
-            err = (target_lab[0] - meas_lab[0]) / 100.0
-            return {"V": _clamp(current["V"] + _gain_delta(err, step_scale, 255, cfg.wb_gain_min_step), 0, 255)}
-
-        def apply(current: dict, new: dict) -> None:
-            self._apply_settings(patch, current, new, {"V": f"GAMMA_{tone + 1}"}, put, read_back=get)
-
-        return self._correction_loop(patch, "gamma", values, normalize, target_lab, corrections, apply)
+    def _measure_gamma_jacobian(self, tones, values, base_L, ramp) -> np.ndarray:
+        """dL*/dunit for every grey × tone: bump each tone, re-measure, restore."""
+        J = np.zeros((len(base_L), len(tones)))
+        logger.info("Gamma: measuring how each of the %d points moves the ramp", len(tones))
+        for t in tones:
+            if self._abort:
+                break
+            v = int(values[t])
+            bump = _GAMMA_BUMP if v + _GAMMA_BUMP <= 255 else -_GAMMA_BUMP
+            self.projector.set_setting("GAMMALV", v + bump, f"{t:02d}")
+            actual = int(self.projector.get_setting("GAMMALV", f"{t:02d}")) - v
+            L_b, _ = ramp(0)
+            self.projector.set_setting("GAMMALV", v, f"{t:02d}")
+            if actual and len(L_b) == len(base_L):
+                J[:, t] = (L_b - base_L) / actual
+            logger.info("Gamma point %d: %s", t + 1, np.round(J[:, t], 3).tolist())
+        return J
 
     # ------------------------------------------------------------------
     # Phase 2 — CMS
@@ -808,7 +1099,7 @@ class CalibrationEngine:
                         self.on_event({"event": "warning", "message":
                             f"CMS {axis} {control.lower()} reached its menu limit; leaving it there."})
 
-            if de < cfg.delta_e_threshold:
+            if de < self._target:
                 converged = True
                 break
 
@@ -1005,7 +1296,7 @@ class CalibrationEngine:
             cfg.proportional_gain_initial,
             max(
                 cfg.proportional_gain_minimum,
-                step_scale * (de / cfg.delta_e_threshold) * 0.5,
+                step_scale * (de / self._target) * 0.5,
             ),
         )
 
@@ -1033,6 +1324,18 @@ class CalibrationEngine:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _lightness(Y: float) -> float:
+    """CIE L* of a relative luminance (white = 100)."""
+    y = max(Y, 0.0) / 100.0
+    f = y ** (1 / 3) if y > (6 / 29) ** 3 else y / (3 * (6 / 29) ** 2) + 4 / 29
+    return 116 * f - 16
+
+
+def _l_de(L: float, L_target: float) -> float:
+    """CIEDE2000 between two neutrals that differ only in lightness."""
+    return delta_e_2000((L, 0.0, 0.0), (L_target, 0.0, 0.0))
+
 
 def _clamp(value: int, lo: int, hi: int) -> int:
     return max(lo, min(hi, value))
@@ -1148,5 +1451,7 @@ def _report_to_dict(report: CalibrationReport) -> dict:
         "cms_results": [_patch_dict(p) for p in report.cms_results],
         "cms_adjustments": report.cms_adjustments,
         "cms_at_limit": report.cms_at_limit,
+        "setting_changes": report.setting_changes,
+        "passes": report.passes,
         "verify_results": [_patch_dict(p) for p in report.verify_results],
     }

@@ -290,22 +290,29 @@ quantizes to ~2.5-unit steps).
 
 ### Gamma (SDR only)
 
-Select `GAMMA F0` (custom), re-measure white, then for each `[grey, tone]` pair in
-`gamma_points` run the shared loop on that grey, adjusting `GAMMALV <tone>`.
-Readings are reduced to lightness only (Y on the white = 100 scale, placed on the
-neutral axis), so ΔE is the L* error against gamma 2.2:
+All 9 custom-gamma points (`GAMMALV 00…08`, active with `GAMMA F0`) are solved
+together against the 11-grey ramp 5, 10 … 90, 95 % — 5 and 95 % reach the end
+tones. The tones overlap and some pull their neighbours the other way, so a
+point-at-a-time loop fights itself; instead the engine:
 
-```
-delta = +round((L_target − L_meas) / 100 × step_scale × 255)   # min step applies
-```
+1. measures the Jacobian J (dL* per unit, 11 greys × 9 tones) once per run by
+   bumping each tone +20, re-reading the ramp and restoring it;
+2. each iteration measures white and the ramp, solves the damped least-squares
+   step `(JᵀJ + λI)Δ = Jᵀe` (e = target L* − measured, λ = 0.02·mean diag JᵀJ),
+   clips it to ±15 units, writes the tones and re-measures;
+3. updates J with Broyden's rule from the observed change, and reverts to the
+   best tones if three iterations don't improve the worst grey.
 
-The pairs come from measuring the 5040UB: each tone was raised by 30 and the
-whole 10–90 % ramp re-read. Tones 00 and 08 are the curve's ends (no effect
-inside 10–90 %); 01–07 sit roughly 10 % apart from black but overlap, and some
-pull their neighbours the other way (05 lowers 50–60 %). So the pair set is
-repeated (`gamma_passes`, default 2) until a pass needs no correction; greys
-without a tone of their own (60, 70, 90 %) are only verified. Skipped in HDR10,
-where the projector tone-maps PQ.
+Readings are lightness only (Y on the white = 100 scale, neutral axis). Skipped
+in HDR10, where the projector tone-maps PQ.
+
+### Levels, white balance and gamma passes
+
+Brightness/Contrast (measured with the colorimeter — near-black step kept
+≥ 80 % of its unclipped size; 96 %/100 % ratio and tint checked for clipping),
+white balance (Color Temp preset nearest D65 first, strongest gain held at the
+neutral ceiling for maximum light) and gamma each move the others, so they
+repeat until a pass makes no change (`calibration_passes`, default 3).
 
 ### Phase 2: CMS (6 axes)
 

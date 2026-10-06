@@ -103,8 +103,13 @@ def neutralize(projector: ProjectorClient) -> dict[str, str]:
     return applied
 
 
+# Raw units to try before concluding a setting is at its end. Most settings
+# step every ~2.5 units; Color Temp has ~10 positions across 0–255.
+_NUDGE_TRIES = {"CTEMP": 40}
+
+
 def nudge(projector: ProjectorClient, token: str, direction: int,
-          param: str | None = None, max_tries: int = 6) -> int:
+          param: str | None = None, max_tries: int | None = None) -> int:
     """Move a quantized 0–255 setting one visible notch up (+1) or down (-1).
 
     The 5040UB stores values in ~2.5-unit steps and silently ignores smaller
@@ -112,7 +117,8 @@ def nudge(projector: ProjectorClient, token: str, direction: int,
     stored value (unchanged at the end of the range).
     """
     before = int(projector.get_setting(token, param))
-    for k in range(1, max_tries + 1):
+    tries = max_tries or _NUDGE_TRIES.get(token, 6)
+    for k in range(1, tries + 1):
         target = before + direction * k
         if not 0 <= target <= 255:
             break

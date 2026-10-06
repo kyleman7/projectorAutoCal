@@ -119,15 +119,19 @@ class CalibrationConfig:
     # rounds repeat until neither point needs a correction
     wb_offset_patch: str = "grey30"
     wb_two_point_rounds: int = 3
-    # [grey %, GAMMALV tone] pairs tuned by the gamma phase, in order. Measured
-    # on a 5040UB (+30 units per tone): tone 00 and 08 barely move 10–90%
-    # (curve ends); 01→10%, 02→10/20%, 03→20%, 04→30%, 05→40% (and pulls
-    # 50–60% down), 06→50/60%, 07→70–80% (weak). Greys without a tone (60, 70,
-    # 90%) are verified, not tuned.
-    gamma_points: list[list[int]] = field(
-        default_factory=lambda: [[10, 1], [20, 3], [30, 4], [40, 5], [50, 6], [80, 7]]
-    )
-    gamma_passes: int = 2
+    # ΔE the correction loops aim for; None = delta_e_threshold (the
+    # verification pass/fail line). Finer targets cost iterations.
+    correction_target: float | None = None
+    # Levels, WB and gamma repeat until a pass makes no change (at most this many)
+    calibration_passes: int = 3
+    # "measured" sets Brightness/Contrast with the colorimeter; "guided" by eye
+    levels_mode: str = "measured"
+    # WB: pick the Color Temp preset nearest D65 first, and keep the strongest
+    # gain at the ceiling (raw 126 = menu 50, neutral) so correcting white
+    # only lowers the other channels instead of dimming all three
+    ctemp_select: bool = True
+    wb_maximize_light: bool = True
+    wb_gain_ceiling: int = 126
     # CMS: "auto" drives the RGBCMY menu with remote-key presses; "guided"
     # tells the user what to change (dry runs are always guided)
     cms_mode: str = "auto"
@@ -161,16 +165,17 @@ class CalibrationConfig:
             raise ConfigError("calibration.hdr_white_nits must be in (0, 10000]")
         if self.wb_two_point_rounds < 1:
             raise ConfigError("calibration.wb_two_point_rounds must be >= 1")
-        pairs = [tuple(pt) for pt in self.gamma_points]
-        if (not pairs or any(len(pt) != 2 for pt in pairs)
-                or any(g not in range(10, 100, 10) or t not in range(9) for g, t in pairs)
-                or len({g for g, _ in pairs}) != len(pairs) or len({t for _, t in pairs}) != len(pairs)):
-            raise ConfigError("calibration.gamma_points must be [grey 10–90 (step 10), tone 0–8] pairs, "
-                              "each grey and tone used once")
         if self.cms_mode not in ("auto", "guided"):
             raise ConfigError("calibration.cms_mode must be auto or guided")
-        if self.gamma_passes < 1:
-            raise ConfigError("calibration.gamma_passes must be >= 1")
+        if self.correction_target is not None and not (0 < self.correction_target <= self.delta_e_threshold):
+            raise ConfigError("calibration.correction_target must be in (0, delta_e_threshold]")
+        if self.calibration_passes < 1:
+            raise ConfigError("calibration.calibration_passes must be >= 1")
+        if self.levels_mode not in ("measured", "guided"):
+            raise ConfigError("calibration.levels_mode must be measured or guided")
+        lo, hi = self.wb_gain_range
+        if not (lo <= self.wb_gain_ceiling <= hi):
+            raise ConfigError("calibration.wb_gain_ceiling must be inside wb_gain_range")
         valid_axes = {"red", "green", "blue", "cyan", "magenta", "yellow"}
         for axis in self.cms_axis_order:
             if axis not in valid_axes:
@@ -313,9 +318,13 @@ def _build_config(data: dict) -> Config:
             ),
             wb_offset_patch=str(cal_raw.get("wb_offset_patch", "grey30")),
             wb_two_point_rounds=int(cal_raw.get("wb_two_point_rounds", 3)),
-            gamma_points=[[int(g), int(t)] for g, t in cal_raw.get(
-                "gamma_points", [[10, 1], [20, 3], [30, 4], [40, 5], [50, 6], [80, 7]])],
-            gamma_passes=int(cal_raw.get("gamma_passes", 2)),
+            correction_target=(None if cal_raw.get("correction_target") is None
+                               else float(cal_raw["correction_target"])),
+            calibration_passes=int(cal_raw.get("calibration_passes", 3)),
+            levels_mode=str(cal_raw.get("levels_mode", "measured")),
+            ctemp_select=bool(cal_raw.get("ctemp_select", True)),
+            wb_maximize_light=bool(cal_raw.get("wb_maximize_light", True)),
+            wb_gain_ceiling=int(cal_raw.get("wb_gain_ceiling", 126)),
             cms_mode=str(cal_raw.get("cms_mode", "auto")),
             apply_baseline_neutral=bool(cal_raw.get("apply_baseline_neutral", True)),
             hdr_white_nits=float(cal_raw.get("hdr_white_nits", 100.0)),
