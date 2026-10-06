@@ -119,12 +119,16 @@ the WB candidates (`GAINx` first) and `CMODE?`/`DYNRANGE?`, and writes
 ```json
 {
   "white_balance": {"R": "GAINR", "G": "GAING", "B": "GAINB"},
-  "picture_mode": {"sdr": [["CMODE", "07"]], "hdr10": [["DYNRANGE", "05"]]}
+  "picture_mode": {"sdr": [["DYNRANGE", "01"], ["CMODE", "07"]], "hdr10": [["DYNRANGE", "05"]]}
 }
 ```
 
-`picture_mode.<mode>` is a list of `[command, value]` pairs sent in order. SDR does not
-touch `DYNRANGE` (forcing SDR would also force later HDR sources to SDR). A legacy bare
+`picture_mode.<mode>` is a list of `[command, value]` pairs sent in order. SDR forces
+`DYNRANGE 01`: with automatic detection (`00`, or the undocumented `10` this projector
+reports) the 5040UB decoded the Pi's SDR signal as HDR — every grey above ~66% (code
+160) clipped to white and the shadows were crushed. The server reads `DYNRANGE` before
+switching and restores it when the run ends, so everyday sources keep auto-switching.
+Dry runs don't write, so they warn when `DYNRANGE` doesn't match the mode. A legacy bare
 string value is still accepted and sent as `<picture_mode.command | hdr.picture_mode_command> <value>`.
 
 ### ArgyllCMS spotread Subprocess
@@ -295,12 +299,17 @@ Phase 1 — White Balance (two-point):
 - After each write the value is read back; the loop tracks what the projector stored
 
 Gamma (SDR only; skipped with a warning in HDR10, where the projector tone-maps PQ):
-- Sets `GAMMA F0` (custom), re-measures reference white, then tunes each `GAMMALV`
-  tone 00–08 against the grey in `gamma_tone_levels` (default 10…90%)
+- Sets `GAMMA F0` (custom), re-measures reference white, then for each `[grey %, tone]`
+  in `gamma_points` tunes `GAMMALV <tone>` against that grey's gamma-2.2 target
+- Tone ↔ grey map, measured on the 5040UB (+30 units, SDR forced): 00 and 08 barely
+  move 10–90% (curve ends); 01→10%; 02→10% & 20%; 03→20% (and 10% −14%); 04→30%;
+  05→40% (and 50–60% −8%); 06→50% & 60%; 07→70–80% (weak, +4%). Default
+  `gamma_points`: `[[10,1],[20,3],[30,4],[40,5],[50,6],[80,7]]` — 60/70/90% are verified only
+- Neighbouring tones interact, so the set repeats up to `gamma_passes` (2) until a pass
+  needs no correction; reported results come from the last pass
 - Readings are reduced to lightness (placed on the neutral axis) so ΔE = L* error vs
-  the gamma-2.2 target; `delta = +round((L_t − L_m)/100 × step_scale × 255)`, min step applies
-- Assumes a higher GAMMALV brightens its tone; the divergence guard reverts if not.
-  The tone ↔ grey-level mapping is an assumption (Epson doesn't document it) — configurable
+  the target; `delta = +round((L_t − L_m)/100 × step_scale × 255)`, min step applies;
+  higher GAMMALV brightens (verified)
 
 Phase 2 — CMS, guided (6 axes: red, green, blue, cyan, magenta, yellow):
 - The 5040UB has no CMS commands, so the user adjusts the RGBCMY menu by hand
@@ -466,7 +475,8 @@ Results cached to `discovery/last_scan.json` (gitignored).
     "proportional_gain_initial": 0.8, "proportional_gain_minimum": 0.1,
     "cms_axis_order": ["red","green","blue","cyan","magenta","yellow"],
     "wb_offset_patch": "grey30", "wb_two_point_rounds": 3,
-    "gamma_tone_levels": [10,20,30,40,50,60,70,80,90], "apply_baseline_neutral": true,
+    "gamma_points": [[10,1],[20,3],[30,4],[40,5],[50,6],[80,7]], "gamma_passes": 2,
+    "apply_baseline_neutral": true,
     "hdr_white_nits": 100
   },
   "hdr": {
@@ -521,7 +531,9 @@ Results cached to `discovery/last_scan.json` (gitignored).
 
 20. **Epson stores image settings per color mode**: restoring a snapshot must set `CMODE` first, and `GAMMA` before the `GAMMALV` points (`picture.PICTURE_SETTINGS` order). Applying a snapshot in another order silently writes values into the wrong mode.
 
-21. **Unverified on hardware** (projector was offline when written): `GAMMALV? xx` reply format (handled with or without the parameter echoed), the tone ↔ grey-level mapping, that higher GAMMALV brightens, and `INIT` as the neutral value for DENSITY/TINT/FCOLOR. The divergence guard limits the damage if a direction is wrong.
+21. **Verified on hardware 2026-10-06**: `GAMMALV? xx` replies `GAMMALV=66` (no parameter echo); higher GAMMALV brightens its tone (tone 00 +27 → 10% grey +18%); `INIT` gives DENSITY 126 / TINT 126 / FCOLOR 93 (factory defaults). Tone ↔ grey-level map: see the Gamma phase above. The tracked CCSS shifted a white reading by ΔE 2.1 vs uncorrected.
+
+22. **DYNRANGE auto-detection misreads the Pi's SDR as HDR** (see Picture mode above): never measure SDR without `DYNRANGE 01`. Symptom: 70/80/90% grey read the same as white.
 
 ---
 

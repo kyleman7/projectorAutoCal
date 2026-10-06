@@ -6,7 +6,7 @@
     "B": "GAINB"
   },
   "picture_mode": {
-    "sdr":   [["CMODE", "07"]],
+    "sdr":   [["DYNRANGE", "01"], ["CMODE", "07"]],
     "hdr10": [["DYNRANGE", "05"]]
   }
 }

@@ -241,18 +241,36 @@ class RunRequest(BaseModel):
     dry_run: bool = False
 
 
-def _switch_picture_mode(projector: ProjectorClient, mode: str) -> None:
+# DYNRANGE value each calibration mode must run under. The projector's
+# automatic detection (00, and the undocumented 10 seen in the field) decoded
+# the Pi's SDR signal as HDR — highlights clipped from ~66% — so SDR runs force
+# 01 and the previous value is restored afterwards.
+_RUN_DYNRANGE = {"sdr": "01", "hdr10": "05"}
+
+
+def _read_dynrange(projector: ProjectorClient) -> str | None:
+    try:
+        return projector.get_setting("DYNRANGE")
+    except ProjectorError:
+        return None
+
+
+def _switch_picture_mode(projector: ProjectorClient, mode: str) -> str | None:
     """Put the projector into the requested picture mode before calibrating.
 
     SDR and HDR settings are completely separate on the 5040UB, so calibrating
     the wrong mode silently produces a useless profile. Skipped when the command
     table has no value for the mode; a rejected command is reported but does not
     abort the run (the user may have already set the mode manually).
+
+    Returns:
+        The DYNRANGE value from before the switch, to restore after the run.
     """
+    previous = _read_dynrange(projector)
     pm = _state.command_table.get("picture_mode", {})
     if not pm.get(mode):
         logger.info("No picture_mode.%s token in command table — skipping mode switch", mode)
-        return
+        return None
     try:
         projector.set_picture_mode(mode, fallback_command=_state.config.hdr.picture_mode_command)
         settle = _state.config.hdr.mode_switch_settle_ms
@@ -265,6 +283,7 @@ def _switch_picture_mode(projector: ProjectorClient, mode: str) -> None:
             "message": f"Picture mode switch to '{mode}' failed ({e}); "
                        "continuing with the projector's current mode.",
         })
+    return previous
 
 
 def _dummy_measure() -> tuple[float, float, float]:
@@ -284,15 +303,24 @@ async def start_run(body: RunRequest) -> dict:
         pgen_cfg = _state.config.pgen
         cal_cfg = _state.config.calibration
         projector = display = col = None
+        restore_dynrange: str | None = None
 
         try:
             projector = ProjectorClient.from_config(
                 proj_cfg, command_table=_state.command_table
             )
             projector.connect()
-            # Dry runs must not mutate projector state — skip the mode switch
+            # Dry runs must not mutate projector state — skip the mode switch,
+            # but say so when the projector will decode the patches wrongly
             if not body.dry_run:
-                _switch_picture_mode(projector, body.mode)
+                restore_dynrange = _switch_picture_mode(projector, body.mode)
+            else:
+                current = _read_dynrange(projector)
+                if current not in (None, _RUN_DYNRANGE[body.mode]):
+                    _state.broadcast_event({"event": "warning", "message":
+                        f"Projector Dynamic Range is {current}, not {_RUN_DYNRANGE[body.mode]} "
+                        f"for {body.mode.upper()} — dry-run readings may be decoded as the wrong "
+                        "signal type (SDR as HDR clips highlights)."})
 
             # Dry runs still show patches — "dry" only means no projector
             # writes, and readings of a blank screen are meaningless. Fall back
@@ -380,6 +408,14 @@ async def start_run(body: RunRequest) -> dict:
             logger.exception("Calibration run failed")
             _state.broadcast_event({"event": "error", "message": str(e)})
         finally:
+            if projector is not None and restore_dynrange not in (None, _RUN_DYNRANGE[body.mode]):
+                # Hand the projector back in the Dynamic Range it was in, so
+                # everyday sources keep switching SDR/HDR as before
+                try:
+                    projector.set_setting("DYNRANGE", restore_dynrange)
+                    logger.info("Restored Dynamic Range to %s", restore_dynrange)
+                except ProjectorError as e:
+                    logger.warning("Could not restore Dynamic Range %s: %s", restore_dynrange, e)
             for cleanup in (
                 display.disconnect if display else None,
                 projector.disconnect if projector else None,

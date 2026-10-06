@@ -620,8 +620,9 @@ class TestTwoPointWhiteBalance:
         assert white.converged and low is None
 
 
-def gamma_measure(proj: FakeProjector, display: FakeDisplay, levels, brightness: float = 0.6):
-    """Neutral greys; each GAMMALV tone scales its grey's luminance (128 = 22% dark)."""
+def gamma_measure(proj: FakeProjector, display: FakeDisplay, points, brightness: float = 0.6):
+    """Neutral greys; each tuned grey's GAMMALV tone scales its luminance (128 = 22% dark)."""
+    tone_for = {grey: tone for grey, tone in points}
     from projector_cal.color_math import get_target_xyY
 
     def _measure():
@@ -631,8 +632,9 @@ def gamma_measure(proj: FakeProjector, display: FakeDisplay, levels, brightness:
         else:
             pct = round(r * 100 / 255)
             target_Y = get_target_xyY(f"grey{pct}", "sdr")[2]
-            tone = levels.index(pct)
-            Y = target_Y * (1 + (proj.settings[f"GAMMALV {tone:02d}"] - 150) / 100)
+            tone = tone_for.get(pct)
+            factor = 1 + (proj.settings[f"GAMMALV {tone:02d}"] - 150) / 100 if tone is not None else 1
+            Y = target_Y * factor
         return (_D65[0] / 100 * Y * brightness, Y * brightness, _D65[2] / 100 * Y * brightness)
     return _measure
 
@@ -647,18 +649,48 @@ class TestGamma:
         cfg = make_config()
         engine = CalibrationEngine(
             projector=proj, display=display,
-            measure=gamma_measure(proj, display, cfg.gamma_tone_levels), config=cfg,
+            measure=gamma_measure(proj, display, cfg.gamma_points), config=cfg,
         )
         results = engine._phase_gamma()
         assert proj.settings["GAMMA"] == "F0"
-        assert [r.patch_name for r in results] == [f"grey{p}" for p in cfg.gamma_tone_levels]
+        assert [r.patch_name for r in results] == [f"grey{g}" for g, _ in cfg.gamma_points]
         moved = 0
-        for tone, r in enumerate(results):
+        for (grey, tone), r in zip(cfg.gamma_points, results):
             assert r.converged, f"{r.patch_name}: ΔE {r.final_delta_e}"
             if r.initial_delta_e > 1.0:  # near black, 22% is still under 1 L*
                 assert proj.settings[f"GAMMALV {tone:02d}"] > 128, r.patch_name
                 moved += 1
-        assert moved >= 8
+        assert moved >= len(cfg.gamma_points) - 1
+        # Untuned tones (curve ends) are never written
+        assert proj.settings["GAMMALV 00"] == 128 and proj.settings["GAMMALV 08"] == 128
+
+    def test_second_pass_rechecks_points_disturbed_by_neighbours(self):
+        """Tone 03 also drags 10% grey down (as on the real projector), after
+        10% was already tuned; only a second pass brings 10% back."""
+        from projector_cal.color_math import delta_e_2000, get_target_lab, xyz_to_lab
+
+        def final_grey10_de(passes):
+            proj = self._projector()
+            display = FakeDisplay()
+            cfg = make_config(gamma_points=[[10, 1], [20, 3]], gamma_passes=passes)
+            base = gamma_measure(proj, display, cfg.gamma_points)
+
+            def measure():
+                X, Y, Z = base()
+                if display.current[1] == round(10 * 255 / 100):
+                    k = 1 - (proj.settings["GAMMALV 03"] - 128) / 60   # neighbour interaction
+                    return (X * k, Y * k, Z * k)
+                return (X, Y, Z)
+
+            engine = CalibrationEngine(projector=proj, display=display, measure=measure, config=cfg)
+            engine._phase_gamma()
+            # Re-measure the projector's actual end state — not the loop's last reading
+            display.display_patch(engine._patch("grey10"))
+            Y = engine._to_relative(*measure())[1]
+            return delta_e_2000(xyz_to_lab(0.95047 * Y, Y, 1.08883 * Y), get_target_lab("grey10", "sdr"))
+
+        assert final_grey10_de(passes=1) > 1.0   # the failure this guards against
+        assert final_grey10_de(passes=2) < 1.0
 
     def test_skipped_in_hdr10(self):
         proj = self._projector()

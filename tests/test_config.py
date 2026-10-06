@@ -95,11 +95,11 @@ class TestCalibrationConfig:
         with pytest.raises(ConfigError, match="unknown axis"):
             CalibrationConfig(cms_axis_order=["red", "ultraviolet"])
 
-    def test_gamma_tone_levels_need_nine_ramp_greys(self):
-        with pytest.raises(ConfigError, match="gamma_tone_levels"):
-            CalibrationConfig(gamma_tone_levels=[10, 20, 30])
-        with pytest.raises(ConfigError, match="gamma_tone_levels"):
-            CalibrationConfig(gamma_tone_levels=[5, 20, 30, 40, 50, 60, 70, 80, 90])
+    def test_gamma_points_must_be_unique_ramp_grey_tone_pairs(self):
+        for bad in ([[5, 1]], [[10, 9]], [[10, 1], [10, 2]], [[10, 1], [20, 1]], [], [[10]]):
+            with pytest.raises(ConfigError, match="gamma_points"):
+                CalibrationConfig(gamma_points=bad)
+        CalibrationConfig(gamma_points=[[10, 1], [50, 6]])
 
     def test_offset_patch_must_be_a_ramp_grey(self):
         with pytest.raises(ConfigError, match="wb_offset_patch"):

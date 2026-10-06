@@ -119,8 +119,15 @@ class CalibrationConfig:
     # rounds repeat until neither point needs a correction
     wb_offset_patch: str = "grey30"
     wb_two_point_rounds: int = 3
-    # Grey level (percent) measured for each custom-gamma point GAMMALV 00–08
-    gamma_tone_levels: list[int] = field(default_factory=lambda: [10, 20, 30, 40, 50, 60, 70, 80, 90])
+    # [grey %, GAMMALV tone] pairs tuned by the gamma phase, in order. Measured
+    # on a 5040UB (+30 units per tone): tone 00 and 08 barely move 10–90%
+    # (curve ends); 01→10%, 02→10/20%, 03→20%, 04→30%, 05→40% (and pulls
+    # 50–60% down), 06→50/60%, 07→70–80% (weak). Greys without a tone (60, 70,
+    # 90%) are verified, not tuned.
+    gamma_points: list[list[int]] = field(
+        default_factory=lambda: [[10, 1], [20, 3], [30, 4], [40, 5], [50, 6], [80, 7]]
+    )
+    gamma_passes: int = 2
     # Reset color/tint/skin tone and processing to neutral at the start of a run
     apply_baseline_neutral: bool = True
     # HDR10 patches: luminance (cd/m²) of the "white" stimulus; every other
@@ -151,10 +158,14 @@ class CalibrationConfig:
             raise ConfigError("calibration.hdr_white_nits must be in (0, 10000]")
         if self.wb_two_point_rounds < 1:
             raise ConfigError("calibration.wb_two_point_rounds must be >= 1")
-        if len(self.gamma_tone_levels) != 9 or any(
-            p not in range(10, 100, 10) for p in self.gamma_tone_levels
-        ):
-            raise ConfigError("calibration.gamma_tone_levels must be 9 values from 10–90 (multiples of 10)")
+        pairs = [tuple(pt) for pt in self.gamma_points]
+        if (not pairs or any(len(pt) != 2 for pt in pairs)
+                or any(g not in range(10, 100, 10) or t not in range(9) for g, t in pairs)
+                or len({g for g, _ in pairs}) != len(pairs) or len({t for _, t in pairs}) != len(pairs)):
+            raise ConfigError("calibration.gamma_points must be [grey 10–90 (step 10), tone 0–8] pairs, "
+                              "each grey and tone used once")
+        if self.gamma_passes < 1:
+            raise ConfigError("calibration.gamma_passes must be >= 1")
         valid_axes = {"red", "green", "blue", "cyan", "magenta", "yellow"}
         for axis in self.cms_axis_order:
             if axis not in valid_axes:
@@ -297,7 +308,9 @@ def _build_config(data: dict) -> Config:
             ),
             wb_offset_patch=str(cal_raw.get("wb_offset_patch", "grey30")),
             wb_two_point_rounds=int(cal_raw.get("wb_two_point_rounds", 3)),
-            gamma_tone_levels=[int(v) for v in cal_raw.get("gamma_tone_levels", range(10, 100, 10))],
+            gamma_points=[[int(g), int(t)] for g, t in cal_raw.get(
+                "gamma_points", [[10, 1], [20, 3], [30, 4], [40, 5], [50, 6], [80, 7]])],
+            gamma_passes=int(cal_raw.get("gamma_passes", 2)),
             apply_baseline_neutral=bool(cal_raw.get("apply_baseline_neutral", True)),
             hdr_white_nits=float(cal_raw.get("hdr_white_nits", 100.0)),
         )

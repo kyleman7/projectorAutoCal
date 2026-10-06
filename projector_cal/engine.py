@@ -600,13 +600,15 @@ class CalibrationEngine:
     def _phase_gamma(self) -> list[PatchResult]:
         """Tune the custom-gamma points so the grey ramp tracks gamma 2.2.
 
-        Each GAMMALV tone is paired with one grey level (cfg.gamma_tone_levels).
-        Readings are reduced to lightness only — chromaticity is the WB
-        phase's job — so ΔE here is the L* error against the target.
+        Each tuned grey is paired with the GAMMALV tone that moves it most
+        cleanly (cfg.gamma_points, measured on a 5040UB). Neighbouring tones
+        interact, so the set is repeated (cfg.gamma_passes) until a pass needs
+        no correction. Readings are reduced to lightness only — chromaticity
+        is the WB phase's job — so ΔE here is the L* error against the target.
         """
         cfg = self.config
-        levels = cfg.gamma_tone_levels
-        self.on_event({"event": "phase_start", "phase": "gamma", "patch_count": len(levels)})
+        points = cfg.gamma_points
+        self.on_event({"event": "phase_start", "phase": "gamma", "patch_count": len(points)})
         results: list[PatchResult] = []
 
         if self.mode != "sdr":
@@ -622,7 +624,7 @@ class CalibrationEngine:
             self.on_event({"event": "phase_done", "phase": "gamma"})
             return results
 
-        logger.info("Gamma: tuning %d custom points [gamma preset was %s]", len(levels), current_gamma)
+        logger.info("Gamma: tuning %d custom points [gamma preset was %s]", len(points), current_gamma)
         if current_gamma != picture.GAMMA_CUSTOM:
             self.on_event({"event": "correction", "patch": "gamma", "axis": "GAMMA",
                            "before": current_gamma, "after": picture.GAMMA_CUSTOM})
@@ -632,15 +634,31 @@ class CalibrationEngine:
         self._measure_white_reference()  # WB moved white since phase 1's reading
         Xw, Yw, Zw = xyY_to_XYZ(*get_target_xyY("white", self.mode))
 
-        for tone, pct in enumerate(levels):
-            if self._abort:
+        outcomes: dict[str, _LoopOutcome] = {}
+        first_de: dict[str, float | None] = {}
+        iterations: dict[str, int] = {}
+        for pass_no in range(1, cfg.gamma_passes + 1):
+            for pct, tone in points:
+                if self._abort:
+                    break
+                patch = f"grey{pct}"
+                o = self._gamma_point(tone, patch, (Xw / Yw, Zw / Yw))
+                outcomes[patch] = o
+                first_de.setdefault(patch, o.initial_de)
+                iterations[patch] = iterations.get(patch, 0) + o.iterations
+            settled = all(o.converged and o.iterations == 1 for o in outcomes.values())
+            logger.info("Gamma pass %d: %s", pass_no,
+                        {p: round(o.final_de, 2) for p, o in outcomes.items()})
+            if settled or self._abort:
                 break
-            results.append(self._gamma_point(tone, f"grey{pct}", (Xw / Yw, Zw / Yw)))
 
+        for patch, o in outcomes.items():
+            o.initial_de, o.iterations = first_de[patch], iterations[patch]
+            results.append(self._emit_patch_result(o, patch))
         self.on_event({"event": "phase_done", "phase": "gamma"})
         return results
 
-    def _gamma_point(self, tone: int, patch: str, white_ratios: tuple[float, float]) -> PatchResult:
+    def _gamma_point(self, tone: int, patch: str, white_ratios: tuple[float, float]) -> _LoopOutcome:
         cfg = self.config
         param = f"{tone:02d}"
         target_lab = get_target_lab(patch, self.mode)
@@ -669,8 +687,7 @@ class CalibrationEngine:
         def apply(current: dict, new: dict) -> None:
             self._apply_settings(patch, current, new, {"V": f"GAMMA_{tone + 1}"}, put, read_back=get)
 
-        outcome = self._correction_loop(patch, "gamma", values, normalize, target_lab, corrections, apply)
-        return self._emit_patch_result(outcome, patch)
+        return self._correction_loop(patch, "gamma", values, normalize, target_lab, corrections, apply)
 
     # ------------------------------------------------------------------
     # Phase 2 — CMS

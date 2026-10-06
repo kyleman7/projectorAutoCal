@@ -43,10 +43,10 @@ WB_CANDIDATES: dict[str, list[str]] = {
 # Picture-mode switching on the 5040UB: CMODE selects the color mode, DYNRANGE
 # the HDR mode (00 Auto, 01 SDR, 02–05 HDR Mode 1–4). Each mode maps to the
 # [command, value] pairs sent in order by ProjectorClient.set_picture_mode.
-# SDR deliberately leaves DYNRANGE alone: forcing it would also force every
-# later HDR source to SDR.
+# SDR forces DYNRANGE 01: automatic detection decoded the Pi's SDR signal as
+# HDR. The server restores the previous DYNRANGE after the run.
 PICTURE_MODE_PRESETS: dict[str, list[list[str]]] = {
-    "sdr":   [["CMODE", "07"]],      # Natural — closest to Rec.709
+    "sdr":   [["DYNRANGE", "01"], ["CMODE", "07"]],   # SDR, Natural — closest to Rec.709
     "hdr10": [["DYNRANGE", "05"]],   # HDR Mode 4 — darkest / most accurate
 }
 

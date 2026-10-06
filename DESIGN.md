@@ -125,9 +125,11 @@ Network menu; otherwise everything but status queries returns `ERR`.
 
 ### Picture mode
 
-`CMODE` sets the color mode (07 Natural for SDR); `DYNRANGE` sets the HDR mode
-(05 = HDR Mode 4). The command table stores a list of `[command, value]` pairs
-per mode.
+`CMODE` sets the color mode (07 Natural for SDR); `DYNRANGE` sets the dynamic
+range (01 = SDR, 05 = HDR Mode 4). The command table stores a list of `[command,
+value]` pairs per mode. SDR runs force `DYNRANGE 01` — the projector's automatic
+detection decoded the Pi's SDR signal as HDR, clipping everything above ~66 % —
+and the server restores the previous `DYNRANGE` when the run ends.
 
 ### CMS
 
@@ -288,18 +290,22 @@ quantizes to ~2.5-unit steps).
 
 ### Gamma (SDR only)
 
-Select `GAMMA F0` (custom), re-measure white, then for each custom point
-`GAMMALV 00…08` run the shared loop on the grey in `gamma_tone_levels`
-(10 … 90 %). Readings are reduced to lightness only (Y on the white = 100 scale,
-placed on the neutral axis), so ΔE is the L* error against gamma 2.2:
+Select `GAMMA F0` (custom), re-measure white, then for each `[grey, tone]` pair in
+`gamma_points` run the shared loop on that grey, adjusting `GAMMALV <tone>`.
+Readings are reduced to lightness only (Y on the white = 100 scale, placed on the
+neutral axis), so ΔE is the L* error against gamma 2.2:
 
 ```
 delta = +round((L_target − L_meas) / 100 × step_scale × 255)   # min step applies
 ```
 
-A higher GAMMALV value is assumed to brighten its tone; the divergence guard
-reverts if that's wrong. Skipped in HDR10, where the projector tone-maps PQ and
-a power-law target doesn't apply.
+The pairs come from measuring the 5040UB: each tone was raised by 30 and the
+whole 10–90 % ramp re-read. Tones 00 and 08 are the curve's ends (no effect
+inside 10–90 %); 01–07 sit roughly 10 % apart from black but overlap, and some
+pull their neighbours the other way (05 lowers 50–60 %). So the pair set is
+repeated (`gamma_passes`, default 2) until a pass needs no correction; greys
+without a tone of their own (60, 70, 90 %) are only verified. Skipped in HDR10,
+where the projector tone-maps PQ.
 
 ### Phase 2: CMS (6 axes, guided)
 
