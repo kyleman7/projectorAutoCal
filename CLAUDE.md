@@ -407,6 +407,15 @@ Max iterations per patch: 20 (configurable)
   4.6 cd/m², 1000-nit → 27.3 cd/m² (115" screen). Mode 4 is far darker
 - Levels and gamma phases are SDR methods — HDR10 runs use `phases: ["wb", "cms"]`
   (`POST /api/run` accepts an explicit `phases` list)
+- `DYNRANGE 10` (not in Epson's list) is the menu's **"Auto (Bright)"** (Signal → Advanced,
+  read with the webcam); HDMI Video Range and Color Space were both Auto
+- **HDR10 targets are not valid yet** (first HDR run, 2026-10-07: verify mean ΔE 3.85, 0/36):
+  the relative targets assume SDR gamma-2.2 luminance ratios, but in HDR the projector applies
+  its own tone curve, so every patch showed ΔL +2…+9 and the auto CMS pushed SAT +30 / LUM
+  −16 chasing it. White balance (chromaticity only) did work (white 7.6 → 2.35). Needed: measure
+  the tone curve from the grey ramp and judge colour luminance against it, run CMS on hue/sat
+  in a luminance-independent space, and put HDR offsets on a brighter grey (30 % ≈ 0.3 cd/m²).
+  Cinema's RGBCMY was reset to 50 afterwards
 
 ---
 
