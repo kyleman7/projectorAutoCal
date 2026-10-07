@@ -41,7 +41,7 @@ import termios  # noqa: E402 — POSIX only
 _XYZ_PATTERN = re.compile(r"Result is XYZ:\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)")
 _READINGS_PER_MEASUREMENT = 3
 _OUTLIER_STD_THRESHOLD = 2.0  # reject readings > this many std devs from mean Y
-_MIN_Y = 0.01                  # readings with Y below this are considered degenerate
+_MIN_Y = 0.001                 # below this a reading is degenerate (i1 Display Pro reads to ~0.003; Cinema-mode black measures ~0.008)
 _READ_TIMEOUT = 0.5            # seconds per select() poll
 _MAX_READ_BYTES = 4096
 
