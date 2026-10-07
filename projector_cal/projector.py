@@ -124,9 +124,31 @@ class TCPTransport:
             self._sock = None
             logger.debug("TCP disconnected")
 
+    def _drain(self) -> None:
+        """Discard bytes left over from an earlier exchange (e.g. a reply that
+        arrived after its command timed out), so they can't be read as the
+        answer to the next command."""
+        stale = b""
+        self._sock.setblocking(False)
+        try:
+            while True:
+                chunk = self._sock.recv(256)
+                if not chunk:
+                    break
+                stale += chunk
+        except (BlockingIOError, InterruptedError):
+            pass
+        except OSError:
+            pass
+        finally:
+            self._sock.settimeout(self.command_timeout)
+        if stale:
+            logger.warning("Discarded stale projector bytes: %r", stale)
+
     def send(self, data: bytes) -> None:
         if self._sock is None:
             raise ProjectorError("TCP transport not connected")
+        self._drain()
         for attempt in range(2):
             try:
                 self._sock.sendall(data)
@@ -243,6 +265,7 @@ class SerialTransport:
     def send(self, data: bytes) -> None:
         if not self.is_connected:
             raise ProjectorError("Serial transport not connected")
+        self._ser.reset_input_buffer()   # drop late replies to earlier commands
         for attempt in range(2):
             try:
                 self._ser.write(data)
@@ -381,15 +404,27 @@ class ProjectorClient:
     # Low-level send/receive
     # ------------------------------------------------------------------
 
-    def _send_raw(self, data: bytes) -> str:
-        self._transport.send(data)
-        return self._transport.recv_until_colon()
+    def _send_raw(self, data: bytes, retry: bool = True) -> str:
+        """Send and read the reply. On a timeout (the projector is sometimes
+        slow while it processes HDR), reconnect and send once more — queries
+        and absolute SETs are safe to repeat; remote keys are not (retry=False)."""
+        try:
+            self._transport.send(data)
+            return self._transport.recv_until_colon()
+        except ProjectorError as e:
+            if not retry or "Timed out" not in str(e):
+                raise
+            logger.warning("Projector slow to answer %r (%s); reconnecting and retrying once", data, e)
+            self._transport.disconnect()
+            self._transport.connect()
+            self._transport.send(data)
+            return self._transport.recv_until_colon()
 
-    def _send_command(self, command: str, parameter: str) -> None:
+    def _send_command(self, command: str, parameter: str, retry: bool = True) -> None:
         """Send SET command; raise ProjectorError if projector returns ERR."""
         payload = f"{command} {parameter}\r".encode(_ENCODING)
         logger.debug("SET  %s %s", command, parameter)
-        response = self._send_raw(payload)
+        response = self._send_raw(payload, retry=retry)
         if "ERR" in response:
             raise ProjectorError(
                 f"Projector rejected command '{command} {parameter}': {response}"
@@ -502,8 +537,10 @@ class ProjectorClient:
         logger.info("%s%s → %s", token, f" {param}" if param else "", value)
 
     def press_key(self, code: str) -> None:
-        """Send a remote-control key (``KEY xx``, hex code from Epson's key table)."""
-        self._send_command("KEY", code)
+        """Send a remote-control key (``KEY xx``, hex code from Epson's key table).
+
+        Never retried: a key that did register would be pressed twice."""
+        self._send_command("KEY", code, retry=False)
 
     def get_power_status(self) -> str:
         """Query PWR? — answered by every ESC/VP21 projector, even in standby.

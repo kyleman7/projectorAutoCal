@@ -23,7 +23,7 @@ class ProjectorConfig:
     host: str = "192.168.1.100"
     port: int = 3629
     connection_timeout: float = 5.0
-    command_timeout: float = 2.0
+    command_timeout: float = 5.0       # the 5040UB can take >2 s to ack while processing HDR
     command_settle_ms: int = 200
     # Transport selection
     transport: Literal["tcp", "serial"] = "tcp"
@@ -297,7 +297,7 @@ def _build_config(data: dict) -> Config:
             host=proj_raw.get("host", "192.168.1.100"),
             port=int(proj_raw.get("port", 3629)),
             connection_timeout=float(proj_raw.get("connection_timeout", 5.0)),
-            command_timeout=float(proj_raw.get("command_timeout", 2.0)),
+            command_timeout=float(proj_raw.get("command_timeout", 5.0)),
             command_settle_ms=int(proj_raw.get("command_settle_ms", 200)),
             transport=proj_raw.get("transport", "tcp"),
             serial_port=proj_raw.get("serial_port", "/dev/ttyUSB0"),

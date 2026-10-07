@@ -90,3 +90,42 @@ def test_set_picture_mode_legacy_value_uses_command():
     proj = ProjectorClient(transport, command_settle_ms=0, command_table=table)  # type: ignore[arg-type]
     proj.set_picture_mode("hdr10")
     assert transport.sent == [b"PMOD HDR4\r"]
+
+
+def test_tcp_client_recovers_from_a_late_reply():
+    """A reply that arrives after its command timed out must not be read as the
+    answer to the next command (seen live: DYNRANGE? got 'CMODE=15')."""
+    import socket as _socket
+    import threading as _threading
+    import time as _time
+
+    from projector_cal.projector import _HANDSHAKE_ACK_LEN
+
+    srv = _socket.create_server(("127.0.0.1", 0))
+    port = srv.getsockname()[1]
+    slow_once = {"A": True}
+
+    def serve():
+        while True:
+            conn, _ = srv.accept()
+            conn.recv(64)
+            conn.sendall(b"\x00" * _HANDSHAKE_ACK_LEN)
+            buf = b""
+            while True:
+                chunk = conn.recv(64)
+                if not chunk:
+                    break
+                buf += chunk
+                while b"\r" in buf:
+                    line, buf = buf.split(b"\r", 1)
+                    token = line.decode().rstrip("?")
+                    if token == "A" and slow_once["A"]:
+                        slow_once["A"] = False
+                        _time.sleep(0.5)                 # answers after the client gave up
+                    conn.sendall(f"{token}={'1' if token == 'A' else '2'}\r:".encode())
+
+    _threading.Thread(target=serve, daemon=True).start()
+    client = ProjectorClient.from_tcp("127.0.0.1", port=port, command_timeout=0.3, command_settle_ms=0)
+    with client:
+        assert client.get_setting("A") == "1"     # timed out once, retried on a fresh connection
+        assert client.get_setting("B") == "2"     # not the stale 'A=1'
