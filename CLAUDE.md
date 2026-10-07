@@ -409,13 +409,19 @@ Max iterations per patch: 20 (configurable)
   (`POST /api/run` accepts an explicit `phases` list)
 - `DYNRANGE 10` (not in Epson's list) is the menu's **"Auto (Bright)"** (Signal → Advanced,
   read with the webcam); HDMI Video Range and Color Space were both Auto
-- **HDR10 targets are not valid yet** (first HDR run, 2026-10-07: verify mean ΔE 3.85, 0/36):
-  the relative targets assume SDR gamma-2.2 luminance ratios, but in HDR the projector applies
-  its own tone curve, so every patch showed ΔL +2…+9 and the auto CMS pushed SAT +30 / LUM
-  −16 chasing it. White balance (chromaticity only) did work (white 7.6 → 2.35). Needed: measure
-  the tone curve from the grey ramp and judge colour luminance against it, run CMS on hue/sat
-  in a luminance-independent space, and put HDR offsets on a brighter grey (30 % ≈ 0.3 cd/m²).
-  Cinema's RGBCMY was reset to 50 afterwards
+- **HDR10 targets follow the measured tone curve.** The first HDR run (2026-10-07) judged
+  colours against SDR gamma-2.2 luminance ratios and failed (mean ΔE 3.85, 0/36; ΔL +2…+9,
+  auto CMS pushed SAT +30 chasing it). Now, in HDR: `_measure_tone_curve()` (white + grey ramp)
+  runs before CMS, and `_target_lab()` keeps each target's chromaticity but takes the
+  luminance the tone curve gives its stimulus (`_tone_map`, log–log interpolation). Verify
+  measures white → greys → colours, rebuilding the curve from its own greys; greys are judged
+  on tint only (`_neutral_at`). A `tone_curve` event reports the points
+- HDR levels (no gamma target to compare with): Brightness walks down from the factory 126
+  while a ~0.6-nit dark grey (code 26) keeps ≥ 80% of its step above black at 126; Contrast
+  walks up from 126 while Y(600 nit)/Y(1000 nit) stays within 0.01 of its factory ratio and
+  the highlight doesn't tint. Gamma isn't touched in HDR (the HDR mode is the tone curve)
+- HDR offsets use `hdr_wb_offset_patch` (grey50) — 30% grey is ~0.3 cd/m², too dim
+- HDR10 runs: `phases: ["levels", "wb", "cms"]`
 
 ---
 

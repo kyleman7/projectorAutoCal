@@ -78,6 +78,14 @@ _OFFSET_INITIAL_GAIN = 0.02    # normalized chromaticity error per notch (first 
 _OFFSET_NOISE = 0.002          # smaller changes are measurement noise
 _OFFSET_MAX_NOTCHES = 4
 
+# HDR10 levels: the projector tone-maps PQ, so crush/clip are judged against
+# the factory-default Brightness/Contrast (126 = menu 50) instead of a gamma curve
+_HDR_LEVEL_REFERENCE = 126
+_HDR_NEAR_BLACK_CODE = 26      # 10 % grey → ~0.6-nit PQ stimulus (100-nit white)
+_HDR_CLIP_HIGH_NITS = 1000     # highlight pair whose ratio reveals clipping
+_HDR_CLIP_LOW_NITS = 600
+_HDR_CLIP_RATIO_TOL = 0.01
+
 # Gamma solver
 _GAMMA_BUMP = 20               # units each tone is moved to measure its effect
 _GAMMA_MAX_STEP = 15           # largest change to one tone per iteration
@@ -253,6 +261,11 @@ class CalibrationEngine:
         self._corrections = 0
         self._setting_changes: dict[str, list] = {}
         self._gamma_J: np.ndarray | None = None
+        # HDR10: measured tone curve, (target relative Y, measured relative Y)
+        # pairs, white = 100 — colour targets follow it instead of SDR gamma
+        self._tone: list[tuple[float, float]] | None = None
+        self._hdr_dark_ref: float | None = None
+        self._hdr_clip_ref: float | None = None
 
     def on_event(self, event: dict) -> None:
         """Forward an event, tracking projector changes for passes and the report."""
@@ -586,6 +599,9 @@ class CalibrationEngine:
         # once gamma lifts the shadows, the step looks bigger and Brightness
         # would keep dropping pass after pass while gamma compensates (seen on
         # the first live multi-pass run: 136 → 114 → 103).
+        if self.mode == "hdr10":
+            self._tune_brightness_hdr(span)
+            return
         try:
             gamma: str | None = self.projector.get_setting("GAMMA")
         except ProjectorError:
@@ -635,6 +651,70 @@ class CalibrationEngine:
             self._walk_to("BRIGHT", best)
         logger.info("Brightness %d → %s", start, self.projector.get_setting("BRIGHT"))
 
+    def _tune_brightness_hdr(self, span: int) -> None:
+        """HDR10: lowest Brightness keeping a dark grey as distinct from black
+        as at the factory default — the tone curve sets the shadows, so there
+        is no gamma target to compare with."""
+        def step() -> float:
+            y0 = self._measure_patch(self._grey_patch(0))[1]
+            return self._measure_patch(self._grey_patch(_HDR_NEAR_BLACK_CODE))[1] - y0
+
+        start = int(self.projector.get_setting("BRIGHT"))
+        if self._pass == 1:
+            self._walk_to("BRIGHT", _HDR_LEVEL_REFERENCE)
+        if self._hdr_dark_ref is None:
+            self._hdr_dark_ref = step()
+        ref = self._hdr_dark_ref
+        current = best = int(self.projector.get_setting("BRIGHT"))
+        logger.info("HDR Brightness reference step %.4f cd/m² (factory %d)", ref, _HDR_LEVEL_REFERENCE)
+        for _ in range(3 * span):
+            moved = self._step_setting("BRIGHT", -1)
+            if moved == current or self._abort:
+                break
+            current = moved
+            d = step()
+            logger.info("HDR Brightness %d: dark step %.4f (%.0f%% of factory)", current, d, 100 * d / ref if ref > 0 else 0)
+            if ref <= 0 or d < _CRUSH_KEEP * ref:
+                break
+            best = current
+        self._walk_to("BRIGHT", best)
+        logger.info("HDR Brightness %d → %d", start, best)
+
+    def _tune_contrast_hdr(self, span: int) -> None:
+        """HDR10: highest Contrast before highlights clip — Y(600 nit)/Y(1000 nit)
+        stays at its factory-default ratio and the highlight doesn't tint."""
+        hi = RGBPatch(*(pq_code10(_HDR_CLIP_HIGH_NITS),) * 3, bits=10)
+        lo = RGBPatch(*(pq_code10(_HDR_CLIP_LOW_NITS),) * 3, bits=10)
+
+        def sample() -> tuple[float, float]:
+            w = self._measure_patch(hi)
+            n = self._measure_patch(lo)
+            norm = lambda xyz: tuple(v * 100.0 / xyz[1] for v in xyz)  # noqa: E731
+            return (n[1] / w[1] if w[1] > 1e-6 else 1.0,
+                    delta_e_2000(xyz_to_lab(*norm(n)), xyz_to_lab(*norm(w))))
+
+        start = int(self.projector.get_setting("CONTRAST"))
+        if self._pass == 1:
+            self._walk_to("CONTRAST", _HDR_LEVEL_REFERENCE)
+        if self._hdr_clip_ref is None:
+            self._hdr_clip_ref = sample()[0]
+        ref = self._hdr_clip_ref
+        current = best = int(self.projector.get_setting("CONTRAST"))
+        for _ in range(4 * span):
+            moved = self._step_setting("CONTRAST", +1)
+            if moved == current or self._abort:
+                break
+            current = moved
+            ratio, shift = sample()
+            clean = ratio <= ref + _HDR_CLIP_RATIO_TOL and shift <= _CLIP_CHROMA_DE
+            logger.info("HDR Contrast %d: 600/1000-nit %.4f (factory %.4f), tint %.2f → %s",
+                        current, ratio, ref, shift, "clean" if clean else "clipping")
+            if not clean:
+                break
+            best = current
+        self._walk_to("CONTRAST", best)
+        logger.info("HDR Contrast %d → %d", start, best)
+
     def _tune_contrast(self, span: int) -> None:
         """Highest Contrast at which near-white stays below white (no clip/tint).
 
@@ -642,6 +722,9 @@ class CalibrationEngine:
         ratio rises toward 1, and a channel clipping first shows up as a
         chromaticity difference between the two.
         """
+        if self.mode == "hdr10":
+            self._tune_contrast_hdr(span)
+            return
         expected = (_NEAR_WHITE_CODE / 255) ** 2.2
 
         def clean() -> bool:
@@ -741,7 +824,7 @@ class CalibrationEngine:
             has_offsets = False
             logger.warning("Projector rejects OFFSETR — single-point (gain-only) white balance")
 
-        low_patch = cfg.wb_offset_patch
+        low_patch = cfg.hdr_wb_offset_patch if self.mode == "hdr10" else cfg.wb_offset_patch
         self.on_event({"event": "phase_start", "phase": "wb", "patch_count": 2 if has_offsets else 1})
         if cfg.ctemp_select and self._pass == 1 and not self.dry_run:
             self._select_ctemp()
@@ -1169,7 +1252,9 @@ class CalibrationEngine:
         auto = self.config.cms_mode == "auto" and self.cms_menu is not None and not self.dry_run
         self.on_event({"event": "phase_start", "phase": "cms", "patch_count": len(self.config.cms_axis_order)})
         logger.info("Phase 2: CMS (%s) [mode=%s]", "automatic" if auto else "guided", self.mode)
-        if self._ref_white_Y is None:
+        if self.mode == "hdr10":
+            self._measure_tone_curve()      # colour luminance targets follow it
+        elif self._ref_white_Y is None:
             self._measure_white_reference()
         results: list[PatchResult] = []
 
@@ -1213,7 +1298,7 @@ class CalibrationEngine:
 
         levels = cfg.cms_sat_levels
         patches = [axis if lvl == 100 else f"{axis}_sat{lvl}" for lvl in levels]
-        targets = {p: get_target_lab(p, self.mode) for p in patches}
+        targets = {p: self._target_lab(p) for p in patches}
         main = axis if axis in patches else patches[-1]
 
         menu.open_axis(axis)
@@ -1325,7 +1410,7 @@ class CalibrationEngine:
         so there is no correction step, step decay, or divergence guard here.
         """
         cfg = self.config
-        target_lab = get_target_lab(axis, self.mode)
+        target_lab = self._target_lab(axis)
         initial_de: float | None = None
         de = float("inf")
         converged = False
@@ -1390,8 +1475,14 @@ class CalibrationEngine:
         self.on_event({"event": "phase_start", "phase": "verify", "patch_count": len(_VERIFY_PATCHES)})
         logger.info("Phase 3: Verification")
         results: list[PatchResult] = []
+        hdr = self.mode == "hdr10"
+        greys = [p for p in _VERIFY_PATCHES if p.startswith("grey")]
+        order = (["white", *greys, *(p for p in _VERIFY_PATCHES if p != "white" and p not in greys)]
+                 if hdr else _VERIFY_PATCHES)
+        if hdr:
+            self._tone = []             # rebuilt from this pass's own grey readings
 
-        for patch_name in _VERIFY_PATCHES:
+        for patch_name in order:
             if self._abort:
                 break
             self.on_event({"event": "patch_start", "patch": patch_name, "iteration": 1, "mode": "verify"})
@@ -1401,7 +1492,10 @@ class CalibrationEngine:
                 # White is measured first; it re-anchors relative colorimetry
                 self._ref_white_Y = Y
             meas_lab = xyz_to_lab(*self._to_relative(X, Y, Z))
-            target_lab = get_target_lab(patch_name, self.mode)
+            if hdr and patch_name.startswith("grey"):
+                self._tone.append((get_target_xyY(patch_name, self.mode)[2], self._to_relative(X, Y, Z)[1]))
+            target_lab = self._target_lab(patch_name) if not (hdr and patch_name.startswith("grey")) \
+                else _neutral_at(self._to_relative(X, Y, Z)[1], self.mode)
             de = delta_e_2000(meas_lab, target_lab)
 
             converged = de < self.config.delta_e_threshold
@@ -1427,6 +1521,30 @@ class CalibrationEngine:
     # ------------------------------------------------------------------
     # Shared helpers
     # ------------------------------------------------------------------
+
+    def _target_lab(self, name: str) -> tuple[float, float, float]:
+        """Lab target for a patch. In HDR10 the projector tone-maps PQ, so the
+        target keeps its chromaticity but takes the luminance the measured tone
+        curve gives its stimulus (white = 100) — not the SDR gamma ratio."""
+        lab = get_target_lab(name, self.mode)
+        if self.mode != "hdr10" or not self._tone or name == "white":
+            return lab
+        x, y, Y = get_target_xyY(name, self.mode)
+        return xyz_to_lab(*xyY_to_XYZ(x, y, _tone_map(self._tone, Y)))
+
+    def _measure_tone_curve(self) -> None:
+        """HDR10: measure white and the grey ramp; store the tone curve."""
+        self._measure_white_reference()
+        points = []
+        for g in GREY_RAMP:
+            if self._abort:
+                return
+            Y = self._to_relative(*self._measure_patch(self._patch(f"grey{g}")))[1]
+            points.append((get_target_xyY(f"grey{g}", self.mode)[2], Y))
+        self._tone = points
+        logger.info("HDR tone curve (target → measured, white=100): %s",
+                    [(round(a, 2), round(b, 2)) for a, b in points])
+        self.on_event({"event": "tone_curve", "points": [[round(a, 4), round(b, 4)] for a, b in points]})
 
     def _patch(self, patch_name: str) -> RGBPatch:
         """The signal for a named patch: 8-bit video codes for SDR, 10-bit
@@ -1499,6 +1617,25 @@ class CalibrationEngine:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _tone_map(points: list[tuple[float, float]], Y: float) -> float:
+    """Relative output luminance for target relative luminance Y, interpolated
+    in log–log over the measured (target, measured) grey points + white."""
+    pts = sorted([(100.0, 100.0), *[(a, b) for a, b in points if a > 0 and b > 0]])
+    if Y <= pts[0][0]:
+        return Y * pts[0][1] / pts[0][0]
+    for (a0, b0), (a1, b1) in zip(pts, pts[1:]):
+        if a0 <= Y <= a1:
+            t = (math.log(Y) - math.log(a0)) / (math.log(a1) - math.log(a0)) if a1 > a0 else 0.0
+            return math.exp(math.log(b0) + t * (math.log(b1) - math.log(b0)))
+    return Y * pts[-1][1] / pts[-1][0]
+
+
+def _neutral_at(Y: float, mode: str) -> tuple[float, float, float]:
+    """Lab of the white point at relative luminance Y (grey judged on tint only)."""
+    x, y, _ = get_target_xyY("white", mode)
+    return xyz_to_lab(*xyY_to_XYZ(x, y, Y))
+
 
 def _lightness(Y: float) -> float:
     """CIE L* of a relative luminance (white = 100)."""

@@ -119,6 +119,8 @@ class CalibrationConfig:
     # Two-point white balance: offsets are tuned on this grey; gain/offset
     # rounds repeat until neither point needs a correction
     wb_offset_patch: str = "grey30"
+    # HDR10: dark greys are too dim to measure reliably (30 % ≈ 0.3 cd/m²)
+    hdr_wb_offset_patch: str = "grey50"
     # Greys whose mean chromaticity the gains are balanced on ("white" alone =
     # classic high point; adding e.g. "grey80" splits mid-scale tint error)
     wb_gain_patches: list[str] = field(default_factory=lambda: ["white"])
@@ -334,6 +336,7 @@ def _build_config(data: dict) -> Config:
                 cal_raw.get("cms_axis_order", ["red", "green", "blue", "cyan", "magenta", "yellow"])
             ),
             wb_offset_patch=str(cal_raw.get("wb_offset_patch", "grey30")),
+            hdr_wb_offset_patch=str(cal_raw.get("hdr_wb_offset_patch", "grey50")),
             wb_gain_patches=[str(v) for v in cal_raw.get("wb_gain_patches", ["white"])],
             wb_two_point_rounds=int(cal_raw.get("wb_two_point_rounds", 3)),
             correction_target=(None if cal_raw.get("correction_target") is None

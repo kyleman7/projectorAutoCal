@@ -1058,3 +1058,80 @@ class TestSpreadWhiteBalance:
             return worst
 
         assert worst_after(["white", "grey80"]) < 0.7 * worst_after(["white"])
+
+
+# ---- HDR10: tone-curve targets and levels ----------------------------------------
+
+def hdr_tone_measure(display: FakeDisplay, exponent=0.7, scale=0.05):
+    """An HDR projector with perfect colour but its own tone curve:
+    relative Y_out = 100·(Y/100)^exponent, absolute ×scale."""
+    from projector_cal.color_math import get_target_xyY, hdr_patch_code10, xyY_to_XYZ
+    from projector_cal.engine import _VERIFY_PATCHES
+
+    by_code = {hdr_patch_code10(n, 100): n for n in _VERIFY_PATCHES}
+
+    def _measure():
+        name = by_code[tuple(display.current)]
+        x, y, Y = get_target_xyY(name, "hdr10")
+        Y_out = 100 * (Y / 100) ** exponent
+        return tuple(v * scale for v in xyY_to_XYZ(x, y, Y_out))
+    return _measure
+
+
+class TestHdrToneCurve:
+    def test_tone_map_interpolates_between_measured_points(self):
+        from projector_cal.engine import _tone_map
+        pts = [(1.0, 4.0), (25.0, 40.0)]
+        assert _tone_map(pts, 100.0) == pytest.approx(100.0)
+        assert _tone_map(pts, 25.0) == pytest.approx(40.0)
+        assert 4.0 < _tone_map(pts, 5.0) < 40.0
+        assert _tone_map(pts, 0.5) == pytest.approx(2.0)      # below the ramp: linear
+
+    def test_verify_judges_colours_against_the_measured_tone_curve(self):
+        class HdrDisplay(FakeDisplay):
+            def display_patch(self, patch):
+                self.current = (patch.r, patch.g, patch.b)
+
+        display = HdrDisplay()
+        engine = CalibrationEngine(projector=FakeProjector(), display=display,
+                                   measure=hdr_tone_measure(display), config=make_config(), mode="hdr10")
+        results = {r.patch_name: r.final_delta_e for r in engine._phase3_verify()}
+        assert len(results) == 36
+        # Perfect colour + a deliberate tone curve: everything verifies
+        assert max(results.values()) < 0.5, sorted(results.items(), key=lambda kv: -kv[1])[:4]
+
+    def test_sdr_style_targets_would_fail_the_same_projector(self):
+        from projector_cal.color_math import delta_e_2000, get_target_lab, xyz_to_lab
+        display = FakeDisplay()
+        measure = hdr_tone_measure(display)
+        engine = CalibrationEngine(projector=FakeProjector(), display=display, measure=measure,
+                                   config=make_config(), mode="hdr10")
+        engine._measure_white_reference()
+        patch = engine._patch("red_sat50")
+        display.current = (patch.r, patch.g, patch.b)
+        lab = xyz_to_lab(*engine._to_relative(*measure()))
+        assert delta_e_2000(lab, get_target_lab("red_sat50", "hdr10")) > 3
+
+
+class TestHdrLevels:
+    def test_brightness_and_contrast_use_factory_references(self):
+        from projector_cal.color_math import pq_code10
+        proj = FakeProjector(settings={"BRIGHT": 101, "CONTRAST": 152})
+        display = FakeDisplay()
+
+        def measure():
+            # Black lifts with Brightness; the 1000-nit highlight clips once Contrast > 140
+            r, g, b = display.current
+            v = r / 1023 if max(r, g, b) > 255 else r / 255
+            off = (proj.settings["BRIGHT"] - 120) * 0.002
+            gain = 1 + (proj.settings["CONTRAST"] - 126) / 100
+            peak = (pq_code10(1000) / 1023) ** 2.4 * 30 * 1.14
+            Y = 0.01 + min(max(0.0, v + off) ** 2.4 * 30 * gain, peak)
+            return (_D65[0] / 100 * Y, Y, _D65[2] / 100 * Y)
+
+        engine = CalibrationEngine(projector=proj, display=display, measure=measure,
+                                   config=make_config(levels_mode="measured"), mode="hdr10")
+        engine._phase_levels()
+        assert proj.settings["BRIGHT"] < 126                 # deeper black than factory
+        # Lowered Brightness delays highlight clipping to ~148 in this model
+        assert 140 <= proj.settings["CONTRAST"] <= 150       # brighter, stopped at clipping
