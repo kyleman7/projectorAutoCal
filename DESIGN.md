@@ -308,8 +308,8 @@ in HDR10, where the projector tone-maps PQ.
 
 ### Levels, white balance and gamma passes
 
-Brightness/Contrast (measured with the colorimeter — near-black step kept
-≥ 80 % of its unclipped size; 96 %/100 % ratio and tint checked for clipping),
+Brightness/Contrast (measured with the colorimeter — the black→4 % step kept
+≥ 80 % of the gamma-2.2 target step, since Brightness acts before gamma; 96 %/100 % ratio and tint checked for clipping),
 white balance (Color Temp preset nearest D65 first, strongest gain held at the
 neutral ceiling for maximum light) and gamma each move the others, so they
 repeat until a pass makes no change (`calibration_passes`, default 3).

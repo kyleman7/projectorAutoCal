@@ -68,7 +68,7 @@ _VERIFY_PATCHES = [
 # step used to detect clipping (8-bit full-range codes)
 _NEAR_BLACK_CODE = 10          # ~4 %: clearly above the black floor yet near it
 _NEAR_WHITE_CODE = 245         # ~96 %
-_CRUSH_KEEP = 0.8              # near-black step must keep 80 % of its unclipped size
+_CRUSH_KEEP = 0.8              # near-black step must keep 80 % of its gamma-target size
 _CLIP_RATIO_TOL = 0.01         # near-white/white ratio may exceed gamma by 1 %
 _CLIP_CHROMA_DE = 1.0          # near-white vs white chromaticity difference allowed
 
@@ -562,40 +562,49 @@ class CalibrationEngine:
             current = moved
 
     def _tune_brightness(self, span: int) -> None:
-        """Lowest Brightness at which the near-black step survives (no crush).
+        """Lowest Brightness at which the near-black step is still fully there.
 
-        Brightness shifts black and the near-black patch together, so their
-        difference stays put until the near-black patch starts sinking into
-        black. Starting `span` notches above, walk down while the difference
-        keeps ≥ _CRUSH_KEEP of its reference size.
+        Brightness offsets the signal before the gamma curve, so the step
+        between black and near-black (code 10, ~4 %) shrinks as Brightness
+        drops — it is not constant — and only collapses below what gamma 2.2
+        asks for once near-black detail starts crushing. So the reference is
+        the target step itself, (10/255)^2.2 × white: walk down while the
+        measured step keeps ≥ _CRUSH_KEEP of it (or up, if already crushed).
         """
-        def sample() -> tuple[float, float]:
+        def step() -> float:
             y0 = self._measure_patch(self._grey_patch(0))[1]
             yn = self._measure_patch(self._grey_patch(_NEAR_BLACK_CODE))[1]
-            return y0, yn - y0
+            return yn - y0
 
-        start = int(self.projector.get_setting("BRIGHT"))
-        for _ in range(span):
-            self._step_setting("BRIGHT", +1)
-        y0, ref = sample()
-        current = int(self.projector.get_setting("BRIGHT"))
-        logger.info("Brightness reference %d: black %.4f, step %.4f cd/m²", current, y0, ref)
-        best = current
-        for _ in range(3 * span):
-            if self._abort:
-                break
-            moved = self._step_setting("BRIGHT", -1)
-            if moved == current:
-                break
-            current = moved
-            y0, d = sample()
-            logger.info("Brightness %d: black %.4f, step %.4f (%.0f%% of reference)",
-                        current, y0, d, 100 * d / ref if ref > 0 else 0)
-            if ref <= 0 or d < _CRUSH_KEEP * ref:
-                break
+        white = self._measure_patch(self._grey_patch(255))[1]
+        ideal = (_NEAR_BLACK_CODE / 255) ** 2.2 * white
+        start = current = int(self.projector.get_setting("BRIGHT"))
+
+        def ok(d: float) -> bool:
+            logger.info("Brightness %d: near-black step %.4f cd/m² (%.0f%% of the %.4f gamma target)",
+                        current, d, 100 * d / ideal if ideal > 0 else 0, ideal)
+            return ideal > 0 and d >= _CRUSH_KEEP * ideal
+
+        if not ok(step()):
+            for _ in range(3 * span):          # crushing already: raise until the step returns
+                moved = self._step_setting("BRIGHT", +1)
+                if moved == current or self._abort:
+                    break
+                current = moved
+                if ok(step()):
+                    break
+        else:
             best = current
-        self._walk_to("BRIGHT", best)
-        logger.info("Brightness %d → %d", start, best)
+            for _ in range(3 * span):          # lower while the step survives
+                moved = self._step_setting("BRIGHT", -1)
+                if moved == current or self._abort:
+                    break
+                current = moved
+                if not ok(step()):
+                    break
+                best = current
+            self._walk_to("BRIGHT", best)
+        logger.info("Brightness %d → %s", start, self.projector.get_setting("BRIGHT"))
 
     def _tune_contrast(self, span: int) -> None:
         """Highest Contrast at which near-white stays below white (no clip/tint).

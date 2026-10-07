@@ -833,20 +833,19 @@ class TestAutoCMS:
 # ---- Measured levels, Color Temp, max-light WB, passes -------------------------
 
 def levels_measure(proj: FakeProjector, display: FakeDisplay, white=60.0, floor=0.02):
-    """Brightness adds a black offset (crushing below 130); Contrast scales
-    white, which clips at 70 cd/m²."""
+    """Brightness offsets the signal before gamma (0 at 130, crushing below);
+    Contrast scales white, which clips at 70 cd/m². A light-leak floor adds to all."""
     def _measure():
-        code = display.current[1]
-        lin = (code / 255) ** 2.2
-        offset = (proj.settings["BRIGHT"] - 130) * 0.004
+        v = display.current[1] / 255
+        offset = (proj.settings["BRIGHT"] - 130) * 0.002
         gain = 1 + (proj.settings["CONTRAST"] - 128) / 100
-        Y = max(floor, min(lin * white * gain, 70.0) + offset)
+        Y = floor + min(max(0.0, v + offset) ** 2.2 * white * gain, 70.0)
         return (_D65[0] / 100 * Y, Y, _D65[2] / 100 * Y)
     return _measure
 
 
 class TestMeasuredLevels:
-    def _engine(self, bright=136, contrast=136):
+    def _engine(self, bright=130, contrast=136):
         proj = FakeProjector(settings={"BRIGHT": bright, "CONTRAST": contrast})
         display = FakeDisplay()
         events = []
@@ -857,9 +856,13 @@ class TestMeasuredLevels:
     def test_brightness_stops_just_before_near_black_crushes(self):
         engine, proj, _ = self._engine(bright=136)
         engine._tune_brightness(span=6)
-        # Black reaches its floor at 135; below that the near-black step shrinks.
-        # The search keeps ≥ 80 % of the step, i.e. stops within a few notches.
-        assert 132 <= proj.settings["BRIGHT"] <= 135
+        # Zero offset at 130; the step keeps ≥ 80 % of its gamma target down to ~128
+        assert 127 <= proj.settings["BRIGHT"] <= 130
+
+    def test_brightness_rises_when_shadows_already_crush(self):
+        engine, proj, _ = self._engine(bright=120)
+        engine._tune_brightness(span=6)
+        assert 127 <= proj.settings["BRIGHT"] <= 130
 
     def test_contrast_rises_to_just_below_white_clipping(self):
         engine, proj, _ = self._engine(contrast=136)

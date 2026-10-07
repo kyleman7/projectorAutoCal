@@ -290,10 +290,11 @@ Baseline (every run):
 - Auto Iris is not in Epson's command list — the UI and the levels step tell the user to turn it off
 
 Levels (`levels_mode: "measured"`, default; dry runs and `"guided"` use the by-eye flow):
-- Brightness: measure black (code 0) and near-black (code 10, ~4%). Brightness shifts both,
-  so their difference is constant until the near-black patch sinks into black. Start `span`
-  notches above (6 on pass 1, 2 later), walk down while the difference keeps ≥ 80% of the
-  reference, keep the lowest such value
+- Brightness: measure white, black (code 0) and near-black (code 10, ~4%). Brightness offsets
+  the signal *before* gamma, so the black→near-black step shrinks steadily as Brightness
+  drops (it is not constant — an earlier version assumed so and stopped far too high, 136
+  vs ~124). The reference is the gamma target step `(10/255)^2.2 × white`: walk down while
+  the measured step keeps ≥ 80% of it (up, if already below), keep the lowest such value
 - Contrast: measure 100% and 96% (code 245). Unclipped, Y96/Y100 = (245/255)^2.2; clipping
   pushes it toward 1 and one channel clipping first shows as a 96%-vs-100% chromaticity
   shift. Walk up while ratio ≤ gamma + 1% and shift ≤ ΔE 1.0 (or down if already clipping)
