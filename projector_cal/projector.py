@@ -542,6 +542,25 @@ class ProjectorClient:
         Never retried: a key that did register would be pressed twice."""
         self._send_command("KEY", code, retry=False)
 
+    # Memory slots: "02" selects the picture-memory bank, slots 01..0A (Memory 1–10)
+    MEMORY_SLOTS = range(1, 11)
+
+    @staticmethod
+    def _memory_param(slot: int) -> str:
+        if slot not in ProjectorClient.MEMORY_SLOTS:
+            raise ValueError(f"memory slot must be 1–10, got {slot}")
+        return f"02 {slot:02X}"
+
+    def save_memory(self, slot: int) -> None:
+        """Store the current picture settings in Memory `slot` (PUSHMEM 02 xx)."""
+        self._send_command("PUSHMEM", self._memory_param(slot))
+        logger.info("Saved picture settings to Memory %d", slot)
+
+    def recall_memory(self, slot: int) -> None:
+        """Load Memory `slot` (POPMEM 02 xx)."""
+        self._send_command("POPMEM", self._memory_param(slot))
+        logger.info("Recalled Memory %d", slot)
+
     def get_power_status(self) -> str:
         """Query PWR? — answered by every ESC/VP21 projector, even in standby.
 

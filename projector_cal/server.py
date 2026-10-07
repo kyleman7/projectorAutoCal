@@ -575,6 +575,28 @@ async def apply_profile_endpoint(filename: str) -> dict:
         raise HTTPException(500, detail=str(e))
 
 
+@app.post("/api/memory/{slot}/{action}")
+async def memory_endpoint(slot: int, action: str) -> dict:
+    """Save the projector's current picture settings to Memory `slot`, or recall it."""
+    if action not in ("save", "recall"):
+        raise HTTPException(404, detail="action must be 'save' or 'recall'")
+    if slot not in ProjectorClient.MEMORY_SLOTS:
+        raise HTTPException(400, detail="slot must be 1–10")
+    if _state.is_running():
+        raise HTTPException(409, detail="Calibration is running")
+    try:
+        with ProjectorClient.from_config(_state.config.projector,
+                                         command_table=_state.command_table) as proj:
+            if action == "save":
+                proj.save_memory(slot)
+            else:
+                proj.recall_memory(slot)
+    except ProjectorError as e:
+        raise HTTPException(500, detail=str(e))
+    _state.broadcast_event({"event": "memory", "action": action, "slot": slot})
+    return {"ok": True}
+
+
 @app.post("/api/profiles/compare")
 async def compare_profiles_endpoint(body: dict) -> dict:
     from .agents.profile_advisor import compare_profiles

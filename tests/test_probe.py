@@ -92,6 +92,21 @@ def test_set_picture_mode_legacy_value_uses_command():
     assert transport.sent == [b"PMOD HDR4\r"]
 
 
+def test_memory_save_and_recall_use_bank_02_and_hex_slots():
+    transport = FakeTransport()
+    proj = ProjectorClient(transport, command_settle_ms=0, command_table={})  # type: ignore[arg-type]
+    proj.save_memory(1)
+    proj.recall_memory(10)
+    assert transport.sent == [b"PUSHMEM 02 01\r", b"POPMEM 02 0A\r"]
+
+
+def test_memory_slot_out_of_range_is_rejected():
+    import pytest
+    proj = ProjectorClient(FakeTransport(), command_settle_ms=0, command_table={})  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        proj.save_memory(11)
+
+
 def test_tcp_client_recovers_from_a_late_reply():
     """A reply that arrives after its command timed out must not be read as the
     answer to the next command (seen live: DYNRANGE? got 'CMODE=15')."""

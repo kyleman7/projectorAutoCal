@@ -495,6 +495,26 @@
         </div>
       </div>
 
+      <!-- Projector memories -->
+      <div class="card">
+        <div class="card-title">Projector Memories</div>
+        <div class="text-dim mb-16" style="font-size:13px">
+          Save the projector's current picture settings to one of its 10 memory slots, or recall one.
+          Recalled memories are also on the remote's Memory button.
+        </div>
+        <div class="flex gap-8 align-center">
+          <select id="memory-slot">
+            <option value="1">Memory 1</option><option value="2">Memory 2</option>
+            <option value="3">Memory 3</option><option value="4">Memory 4</option>
+            <option value="5">Memory 5</option><option value="6">Memory 6</option>
+            <option value="7">Memory 7</option><option value="8">Memory 8</option>
+            <option value="9">Memory 9</option><option value="10">Memory 10</option>
+          </select>
+          <button class="btn btn-sm" onclick="memoryAction('save')">Save Current Settings</button>
+          <button class="btn btn-sm" onclick="memoryAction('recall')">Recall</button>
+        </div>
+      </div>
+
       <!-- Profile comparison -->
       <div class="card" id="compare-card" style="display:none">
         <div class="card-title">Profile Comparison</div>

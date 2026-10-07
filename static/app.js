@@ -1024,6 +1024,18 @@ async function saveCurrentProfile() {
   else alert('Error: ' + (data.detail || 'unknown'));
 }
 
+async function memoryAction(action) {
+  const slot = v('memory-slot');
+  const prompt = action === 'save'
+    ? `Overwrite projector Memory ${slot} with the current picture settings?`
+    : `Recall projector Memory ${slot}? This replaces the current picture settings.`;
+  if (!confirm(prompt)) return;
+  const res = await fetch(`/api/memory/${slot}/${action}`, { method: 'POST' });
+  const data = await res.json();
+  if (data.ok) alert(action === 'save' ? `Saved to Memory ${slot}.` : `Memory ${slot} recalled.`);
+  else alert('Error: ' + (data.detail || 'unknown'));
+}
+
 // ---------------------------------------------------------------------------
 // Utility
 // ---------------------------------------------------------------------------

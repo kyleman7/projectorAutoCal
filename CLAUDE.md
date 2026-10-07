@@ -455,6 +455,7 @@ All engine events are broadcast as JSON objects. Key events:
 {"event": "agent_result",   "agent": "results_analyst", "result": {...}}
 {"event": "setup_check",    "ready": true, "checklist": [...], "blocking_issues": []}
 {"event": "profile_applied","profile": "My SDR Profile"}
+{"event": "memory",         "action": "save|recall", "slot": 1}
 ```
 
 ---
@@ -474,6 +475,7 @@ All engine events are broadcast as JSON objects. Key events:
 | POST   | `/api/profiles` | Save current projector state as profile |
 | DELETE | `/api/profiles/{filename}` | Delete a profile |
 | POST   | `/api/profiles/{filename}/apply` | Apply profile to projector |
+| POST   | `/api/memory/{slot}/{save\|recall}` | Projector Memory 1–10: `PUSHMEM 02 xx` / `POPMEM 02 xx` (slot in hex) |
 | POST   | `/api/profiles/compare` | AI comparison of two profiles (`{a: filename, b: filename}`) |
 | POST   | `/api/discover` | Start mDNS + port scan |
 | GET    | `/api/discover/last` | Load cached scan results |
@@ -650,7 +652,7 @@ python -m projector_cal
 | **Setup** | Guided flow: workflow progress strip, then numbered steps — 1 connections (Save & Test persists fields via POST /api/config; the run reads the saved config, not the fields), 2 command probe, 3 screen info (optional), 4 placement checklist, 5 warm-up + pre-flight validation; AI settings card at the bottom. Step checkmarks driven by GET /api/setup/status + client state |
 | **Run** | Readiness banner (warns if command table unprobed or colorimeter unavailable on host), mode/phase selector with first-run guidance, dry-run toggle, start/stop (Start re-saves Setup fields first), guided levels card (instructions, −/+ per control, Done), guided-CMS card (instructions + Re-measure / Accept & next), patch grid (white, colors, grey ramp) with live ΔE, progress bar, live log |
 | **Before/After** | ΔE comparison table (before = initial ΔE, after = verify pass), AI Analysis card (grade + issues + recommendations) |
-| **Profiles** | Grouped by mode, apply/delete buttons, save-current-state (full picture-settings snapshot; apply restores it in dependency order — CMODE first, GAMMA before GAMMALV), AI profile comparison |
+| **Profiles** | Grouped by mode, apply/delete buttons, save-current-state (full picture-settings snapshot; apply restores it in dependency order — CMODE first, GAMMA before GAMMALV), projector Memory 1–10 save/recall, AI profile comparison |
 
 All tabs receive real-time updates via WebSocket (`/ws`).
 
