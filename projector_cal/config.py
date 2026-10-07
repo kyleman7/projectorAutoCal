@@ -135,6 +135,12 @@ class CalibrationConfig:
     # CMS: "auto" drives the RGBCMY menu with remote-key presses; "guided"
     # tells the user what to change (dry runs are always guided)
     cms_mode: str = "auto"
+    # Auto CMS: reset each control to its default (50) first, and judge each
+    # axis on these saturation levels together (100 = the full colour). The
+    # projector's CMS rotates mid-saturations differently from 100 %, so
+    # optimising 100 % alone can wreck the in-between colours.
+    cms_reset: bool = True
+    cms_sat_levels: list[int] = field(default_factory=lambda: [75, 100])
     # Reset color/tint/skin tone and processing to neutral at the start of a run
     apply_baseline_neutral: bool = True
     # HDR10 patches: luminance (cd/m²) of the "white" stimulus; every other
@@ -167,6 +173,8 @@ class CalibrationConfig:
             raise ConfigError("calibration.wb_two_point_rounds must be >= 1")
         if self.cms_mode not in ("auto", "guided"):
             raise ConfigError("calibration.cms_mode must be auto or guided")
+        if not self.cms_sat_levels or any(v not in (25, 50, 75, 100) for v in self.cms_sat_levels):
+            raise ConfigError("calibration.cms_sat_levels must be drawn from 25, 50, 75, 100")
         if self.correction_target is not None and not (0 < self.correction_target <= self.delta_e_threshold):
             raise ConfigError("calibration.correction_target must be in (0, delta_e_threshold]")
         if self.calibration_passes < 1:
@@ -326,6 +334,8 @@ def _build_config(data: dict) -> Config:
             wb_maximize_light=bool(cal_raw.get("wb_maximize_light", True)),
             wb_gain_ceiling=int(cal_raw.get("wb_gain_ceiling", 126)),
             cms_mode=str(cal_raw.get("cms_mode", "auto")),
+            cms_reset=bool(cal_raw.get("cms_reset", True)),
+            cms_sat_levels=[int(v) for v in cal_raw.get("cms_sat_levels", [75, 100])],
             apply_baseline_neutral=bool(cal_raw.get("apply_baseline_neutral", True)),
             hdr_white_nits=float(cal_raw.get("hdr_white_nits", 100.0)),
         )

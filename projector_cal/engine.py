@@ -69,8 +69,14 @@ _VERIFY_PATCHES = [
 _NEAR_BLACK_CODE = 10          # ~4 %: clearly above the black floor yet near it
 _NEAR_WHITE_CODE = 245         # ~96 %
 _CRUSH_KEEP = 0.8              # near-black step must keep 80 % of its gamma-target size
+_BRIGHTNESS_GAMMA_PRESET = "22"  # gamma "0" preset used while judging black
 _CLIP_RATIO_TOL = 0.01         # near-white/white ratio may exceed gamma by 1 %
 _CLIP_CHROMA_DE = 1.0          # near-white vs white chromaticity difference allowed
+
+# Two-point WB offsets on a dark grey (learned step sizes)
+_OFFSET_INITIAL_GAIN = 0.02    # normalized chromaticity error per notch (first guess)
+_OFFSET_NOISE = 0.002          # smaller changes are measurement noise
+_OFFSET_MAX_NOTCHES = 4
 
 # Gamma solver
 _GAMMA_BUMP = 20               # units each tone is moved to measure its effect
@@ -150,6 +156,8 @@ class CalibrationReport:
     cms_adjustments: dict[str, dict[str, int]] = field(default_factory=dict)
     # Controls that hit a menu end stop (0/100) — their step counts overstate the travel
     cms_at_limit: dict[str, list[str]] = field(default_factory=dict)
+    # Absolute RGBCMY menu values, where known (controls reset to 50 this run)
+    cms_values: dict[str, dict[str, int]] = field(default_factory=dict)
     # Every projector setting the run changed: {axis: [first before, last after]}
     setting_changes: dict[str, list] = field(default_factory=dict)
     passes: int = 0
@@ -319,6 +327,7 @@ class CalibrationEngine:
                 report.cms_results = self._phase2_cms()
                 report.cms_at_limit = {a: sorted(c) for a, c in self._cms_at_limit.items() if c}
                 if self.cms_menu is not None:
+                    report.cms_values = {a: dict(v) for a, v in self.cms_menu.values.items() if v}
                     report.cms_adjustments = {
                         axis: {c: n for c, n in moved.items() if n}
                         for axis, moved in self.cms_menu.offsets.items() if any(moved.values())
@@ -571,6 +580,24 @@ class CalibrationEngine:
         the target step itself, (10/255)^2.2 × white: walk down while the
         measured step keeps ≥ _CRUSH_KEEP of it (or up, if already crushed).
         """
+        # Judge black against a standard gamma preset, not the custom curve:
+        # once gamma lifts the shadows, the step looks bigger and Brightness
+        # would keep dropping pass after pass while gamma compensates (seen on
+        # the first live multi-pass run: 136 → 114 → 103).
+        try:
+            gamma: str | None = self.projector.get_setting("GAMMA")
+        except ProjectorError:
+            gamma = None                       # no gamma control: judge as-is
+        swap = gamma not in (None, _BRIGHTNESS_GAMMA_PRESET)
+        if swap:
+            self.projector.set_setting("GAMMA", _BRIGHTNESS_GAMMA_PRESET)
+        try:
+            self._tune_brightness_on_preset(span)
+        finally:
+            if swap:
+                self.projector.set_setting("GAMMA", gamma)
+
+    def _tune_brightness_on_preset(self, span: int) -> None:
         def step() -> float:
             y0 = self._measure_patch(self._grey_patch(0))[1]
             yn = self._measure_patch(self._grey_patch(_NEAR_BLACK_CODE))[1]
@@ -728,7 +755,7 @@ class CalibrationEngine:
             hi_first_de = hi.initial_de if hi_first_de is None else hi_first_de
             if self._abort or not has_offsets:
                 break
-            lo = self._wb_point(low_patch, "offset")
+            lo = self._wb_offset_point(low_patch)
             lo_iters += lo.iterations
             lo_first_de = lo.initial_de if lo_first_de is None else lo_first_de
             settled = all(o.converged and o.iterations == 1 for o in (hi, lo))
@@ -800,6 +827,101 @@ class CalibrationEngine:
             if moved == current:
                 break
             current = moved
+
+    def _wb_offset_point(self, patch: str) -> _LoopOutcome:
+        """Offsets on a dark grey, with step sizes learned from measured effect.
+
+        On a dark grey one offset notch moves chromaticity a lot (one blue
+        notch swung ΔE 3.6 → 13.7 at 30 % on the 5040UB), so the gains'
+        proportional formula overshoots. Each move is one channel by a few
+        notches; the per-notch effect (signed) is re-estimated from every
+        move, like the automatic CMS. G stays the reference.
+        """
+        cfg = self.config
+        target_lab = get_target_lab("white", self.mode)
+        tx, ty, _ = get_target_xyY("white", self.mode)
+        TX, _, TZ = xyY_to_XYZ(tx, ty, 100.0)
+        tokens = {"R": "OFFSETR", "B": "OFFSETB"}
+        gains = {"R": _OFFSET_INITIAL_GAIN, "B": _OFFSET_INITIAL_GAIN}  # error per notch
+        best_de, best_vals, worse = float("inf"), None, 0
+        initial_de: float | None = None
+        de, converged, iteration = float("inf"), False, 0
+        X = Y = Z = 0.0
+        last: tuple[str, int, float] | None = None
+
+        def read() -> dict[str, int]:
+            return {ch: int(self.projector.get_setting(t)) for ch, t in tokens.items()}
+
+        def measure() -> tuple[float, dict[str, float], tuple[float, float, float]]:
+            xyz = self.measure()
+            s = 100.0 / xyz[1] if xyz[1] > 1e-6 else 1.0
+            Xn, Yn, Zn = (v * s for v in xyz)
+            return (delta_e_2000(xyz_to_lab(Xn, Yn, Zn), target_lab),
+                    {"R": (Xn - TX) / TX, "B": (Zn - TZ) / TZ}, xyz)
+
+        self.display.display_patch(self._patch(patch))
+        for iteration in range(1, cfg.max_iterations_per_patch + 1):
+            if self._abort:
+                break
+            self.on_event({"event": "patch_start", "patch": patch, "iteration": iteration, "mode": "wb"})
+            de, errs, (X, Y, Z) = measure()
+            self.on_event({"event": "measurement", "patch": patch, "xyz": [X, Y, Z], "delta_e": de})
+            logger.info("WB offsets %s iter %d: ΔE=%.3f R%+.4f B%+.4f", patch, iteration, de, errs["R"], errs["B"])
+            if initial_de is None:
+                initial_de = de
+            if last is not None:
+                ch, notches, before = last
+                change = errs[ch] - before
+                if abs(change) >= _OFFSET_NOISE:
+                    g = change / notches
+                    gains[ch] = math.copysign(min(0.2, max(0.002, abs(g))), g)
+            if de < self._target or self.dry_run:
+                converged = de < self._target
+                break
+            if de < best_de:
+                best_de, best_vals, worse = de, read(), 0
+            else:
+                worse += 1
+                if worse >= _MAX_WORSENING_ITERATIONS:
+                    logger.warning("WB offsets %s not improving — reverting to %s (ΔE=%.3f)", patch, best_vals, best_de)
+                    for ch, v in best_vals.items():
+                        self._walk_offset(tokens[ch], v)
+                    break
+            ch = max(tokens, key=lambda c: abs(errs[c]))
+            notches = round(-errs[ch] / gains[ch])
+            if notches == 0:
+                notches = -1 if errs[ch] * gains[ch] > 0 else 1
+            notches = max(-_OFFSET_MAX_NOTCHES, min(_OFFSET_MAX_NOTCHES, notches))
+            moved = self._move_offset(tokens[ch], notches)
+            if moved == 0:
+                logger.warning("WB offset %s at its limit", tokens[ch])
+                break
+            last = (ch, moved, errs[ch])
+
+        if not converged and not self._abort and not self.dry_run:
+            de, _, (X, Y, Z) = measure()
+        return _LoopOutcome(final_de=de, initial_de=initial_de, iterations=iteration,
+                            converged=converged, xyz=(X, Y, Z))
+
+    def _move_offset(self, token: str, notches: int) -> int:
+        """Move an offset by whole visible notches; return the notches actually moved."""
+        moved = 0
+        for _ in range(abs(notches)):
+            before = int(self.projector.get_setting(token))
+            after = picture.nudge(self.projector, token, 1 if notches > 0 else -1)
+            if after == before:
+                break
+            self.on_event({"event": "correction", "patch": "grey", "axis": f"WB_OFFSET_{token[-1]}",
+                           "before": before, "after": after})
+            moved += 1 if notches > 0 else -1
+        return moved
+
+    def _walk_offset(self, token: str, value: int) -> None:
+        current = int(self.projector.get_setting(token))
+        while current != value:
+            if self._move_offset(token, 1 if value > current else -1) == 0:
+                break
+            current = int(self.projector.get_setting(token))
 
     def _wb_point(self, patch: str, kind: Literal["gain", "offset"]) -> _LoopOutcome:
         """Correct one grey-scale point's chromaticity with gains or offsets.
@@ -1067,8 +1189,35 @@ class CalibrationEngine:
         blocked: dict[str, int] = {}
         at_limit = self._cms_at_limit.setdefault(axis, set())
 
-        self.display.display_patch(self._patch(axis))
+        levels = cfg.cms_sat_levels
+        patches = [axis if lvl == 100 else f"{axis}_sat{lvl}" for lvl in levels]
+        targets = {p: get_target_lab(p, self.mode) for p in patches}
+        main = axis if axis in patches else patches[-1]
+
         menu.open_axis(axis)
+        if cfg.cms_reset:
+            # Start from the factory 50s: known absolute values, and no
+            # leftover extreme settings distorting the mid-saturations
+            for c in _CMS_CONTROLS:
+                menu.reset_control(c)
+                offsets[c] = 0
+            self.on_event({"event": "correction", "patch": axis, "axis": f"CMS_{axis}_RESET",
+                           "before": "custom", "after": "50/50/50"})
+
+        def reading() -> tuple[float, float, dict[str, float], tuple[float, float, float]]:
+            """Mean ΔE and per-control errors over the saturation levels."""
+            des, errs_all, xyz_main = [], [], (0.0, 0.0, 0.0)
+            for p in patches:
+                xyz = self._measure_patch(self._patch(p))
+                lab = xyz_to_lab(*self._to_relative(*xyz))
+                d = delta_e_2000(lab, targets[p])
+                self.on_event({"event": "measurement", "patch": p, "xyz": list(xyz), "delta_e": d})
+                des.append(d)
+                errs_all.append(cms_errors(lab, targets[p]))
+                if p == main:
+                    xyz_main = xyz
+            errs = {c: sum(e[c] for e in errs_all) / len(errs_all) for c in _CMS_CONTROLS}
+            return sum(des) / len(des), max(des), errs, xyz_main
 
         def move(control: str, steps: int) -> None:
             before = offsets[control]
@@ -1081,13 +1230,9 @@ class CalibrationEngine:
             if self._abort:
                 break
             self.on_event({"event": "patch_start", "patch": axis, "iteration": iteration, "mode": "cms"})
-            X, Y, Z = self.measure()
-            meas_lab = xyz_to_lab(*self._to_relative(X, Y, Z))
-            de = delta_e_2000(meas_lab, target_lab)
-            self.on_event({"event": "measurement", "patch": axis, "xyz": [X, Y, Z], "delta_e": de})
-            errs = cms_errors(meas_lab, target_lab)
-            logger.info("CMS %s iter %d: ΔE=%.3f hue=%+.1f° sat=%+.1f%% lum=%+.1f",
-                        axis, iteration, de, errs["HUE"], errs["SAT"], errs["LUM"])
+            de, worst, errs, (X, Y, Z) = reading()
+            logger.info("CMS %s iter %d: mean ΔE=%.3f (worst %.3f over %s) hue=%+.1f° sat=%+.1f%% lum=%+.1f",
+                        axis, iteration, de, worst, levels, errs["HUE"], errs["SAT"], errs["LUM"])
             if initial_de is None:
                 initial_de = de
 
@@ -1108,7 +1253,7 @@ class CalibrationEngine:
                         self.on_event({"event": "warning", "message":
                             f"CMS {axis} {control.lower()} reached its menu limit; leaving it there."})
 
-            if de < self._target:
+            if worst < self._target:
                 converged = True
                 break
 
@@ -1145,8 +1290,7 @@ class CalibrationEngine:
             last_move = (control, steps, errs[control])
 
         if not converged and not self._abort:
-            X, Y, Z = self.measure()   # report the projector's actual final state
-            de = delta_e_2000(xyz_to_lab(*self._to_relative(X, Y, Z)), target_lab)
+            de, _, _, (X, Y, Z) = reading()   # report the projector's actual final state
 
         outcome = _LoopOutcome(final_de=de, initial_de=initial_de, iterations=iteration,
                                converged=converged, xyz=(X, Y, Z))
@@ -1460,6 +1604,7 @@ def _report_to_dict(report: CalibrationReport) -> dict:
         "cms_results": [_patch_dict(p) for p in report.cms_results],
         "cms_adjustments": report.cms_adjustments,
         "cms_at_limit": report.cms_at_limit,
+        "cms_values": report.cms_values,
         "setting_changes": report.setting_changes,
         "passes": report.passes,
         "verify_results": [_patch_dict(p) for p in report.verify_results],

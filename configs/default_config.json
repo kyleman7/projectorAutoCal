@@ -42,6 +42,8 @@
     "wb_maximize_light": true,
     "wb_gain_ceiling": 126,
     "cms_mode": "auto",
+    "cms_reset": true,
+    "cms_sat_levels": [75, 100],
     "apply_baseline_neutral": true,
     "hdr_white_nits": 100
   },

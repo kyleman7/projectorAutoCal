@@ -119,6 +119,8 @@ def make_config(**overrides) -> CalibrationConfig:
         ctemp_select=False,
         wb_maximize_light=False,
         calibration_passes=1,
+        cms_reset=False,
+        cms_sat_levels=[100],
     )
     defaults.update(overrides)
     return CalibrationConfig(**defaults)
@@ -743,6 +745,9 @@ class FakeMenu:
         self.open_count = 0
         self.closed = True
         self.offsets = {a: {"HUE": 0, "SAT": 0, "LUM": 0} for a in _CMS_AXES}
+        self.values = {a: {} for a in _CMS_AXES}
+        self.reset_value = 0
+        self.resets = []
 
     def open_axis(self, axis):
         self.axis, self.closed = axis, False
@@ -757,6 +762,10 @@ class FakeMenu:
 
     def close(self):
         self.closed = True
+
+    def reset_control(self, control):
+        self.proj.cms[self.axis][control] = self.reset_value
+        self.resets.append((self.axis, control))
 
 
 class TestAutoCMS:
@@ -874,6 +883,22 @@ class TestMeasuredLevels:
         engine._tune_contrast(span=6)
         assert proj.settings["CONTRAST"] <= 146
 
+    def test_brightness_judged_on_standard_gamma_then_restored(self):
+        proj = FakeProjector(settings={"BRIGHT": 130, "CONTRAST": 136, "GAMMA": "F0"})
+        display = FakeDisplay()
+        seen = []
+        base = levels_measure(proj, display)
+
+        def measure():
+            seen.append(proj.settings["GAMMA"])
+            return base()
+
+        engine = CalibrationEngine(projector=proj, display=display, measure=measure,
+                                   config=make_config(levels_mode="measured"))
+        engine._tune_brightness(span=2)
+        assert {str(g) for g in seen} == {"22"}   # every brightness reading on the preset
+        assert proj.settings["GAMMA"] == "F0"  # custom curve back afterwards
+
     def test_changes_are_reported(self):
         engine, proj, events = self._engine(bright=140)
         engine._phase_levels()
@@ -937,3 +962,67 @@ class TestPasses:
                                    config=make_config(correction_target=0.5))
         white, _ = engine._phase1_white_balance()
         assert white.final_delta_e < 0.5
+
+
+def sweep_measure(proj: FakeProjector, display: FakeDisplay, axis: str = "red", brightness: float = 0.6):
+    """Every patch of `axis` (any saturation) is its target, shifted by the CMS
+    controls in proportion to how saturated it is — like a hue-region CMS."""
+    from projector_cal.color_math import get_target_lab, patch_rgb
+
+    by_rgb = {patch_rgb(n): n for n in [axis] + [f"{axis}_sat{s}" for s in (25, 50, 75)]}
+
+    def _measure():
+        name = by_rgb.get(display.current)
+        if name is None:                       # white reference
+            return (_D65[0] * brightness, 100.0 * brightness, _D65[2] * brightness)
+        L_t, a_t, b_t = get_target_lab(name, "sdr")
+        w = 1.0 if name == axis else int(name.rsplit("sat", 1)[1]) / 100
+        ctl = proj.cms[axis]
+        hue = math.atan2(b_t, a_t) + math.radians((ctl["HUE"] - 5) * 1.0 * w)
+        chroma = math.hypot(a_t, b_t) * (1 + (ctl["SAT"] - 5) * 0.02 * w)
+        L = L_t + (ctl["LUM"] - 2) * 2.0 * w
+        X, Y, Z = lab_to_xyz(L, chroma * math.cos(hue), chroma * math.sin(hue))
+        return (X * brightness, Y * brightness, Z * brightness)
+    return _measure
+
+
+class TestCmsResetAndSweeps:
+    def test_resets_then_converges_across_saturation_levels(self):
+        proj = FakeProjector(cms={"HUE": 20, "SAT": -9, "LUM": 9})   # leftover extreme settings
+        display = FakeDisplay()
+        menu = FakeMenu(proj)
+        events = []
+        engine = CalibrationEngine(
+            projector=proj, display=display, measure=sweep_measure(proj, display),
+            config=make_config(cms_reset=True, cms_sat_levels=[75, 100]),
+            cms_menu=menu, on_event=events.append,
+        )
+        engine._ref_white_Y = 60.0
+        result = engine._phase2_cms()[0]
+        assert set(menu.resets) == {("red", "HUE"), ("red", "SAT"), ("red", "LUM")}
+        assert result.converged, f"ΔE {result.final_delta_e}"
+        measured = {e["patch"] for e in events if e["event"] == "measurement"}
+        assert {"red", "red_sat75"} <= measured
+        # Near the true settings (HUE 5, SAT 5, LUM 2) — within the ΔE target, not exact
+        assert all(abs(proj.cms["red"][c] - v) <= 1 for c, v in (("HUE", 5), ("SAT", 5), ("LUM", 2)))
+
+
+class TestLearnedOffsets:
+    def test_coarse_offsets_converge_without_oscillating(self):
+        """One offset notch moves the dark grey a lot; the loop must still settle."""
+        proj = FakeProjector(settings={"OFFSETR": 140, "OFFSETG": 128, "OFFSETB": 116})
+        display = FakeDisplay()
+
+        def measure():
+            v = (display.current[1] / 255) ** 2.2
+            out = []
+            for ch, ref in zip("RGB", _D65):
+                off = (proj.settings[f"OFFSET{ch}"] - 128) / 255 * 0.08   # strong at low level
+                out.append(ref * max(v + off * v ** 0.3, 1e-4) * 0.6)
+            return tuple(out)
+
+        engine = CalibrationEngine(projector=proj, display=display, measure=measure,
+                                   config=make_config(correction_target=0.5))
+        result = engine._wb_offset_point("grey30")
+        assert result.final_de < 0.5, f"ΔE {result.final_de}"
+        assert result.iterations <= 12

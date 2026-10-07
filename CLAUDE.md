@@ -294,7 +294,10 @@ Levels (`levels_mode: "measured"`, default; dry runs and `"guided"` use the by-e
   the signal *before* gamma, so the black→near-black step shrinks steadily as Brightness
   drops (it is not constant — an earlier version assumed so and stopped far too high, 136
   vs ~124). The reference is the gamma target step `(10/255)^2.2 × white`: walk down while
-  the measured step keeps ≥ 80% of it (up, if already below), keep the lowest such value
+  the measured step keeps ≥ 80% of it (up, if already below), keep the lowest such value.
+  Judged with `GAMMA 22` (preset "0") swapped in and the custom curve restored afterwards —
+  measured through the custom curve, Brightness and gamma fed each other across passes
+  (136 → 114 → 103 while gamma raised every point ~25)
 - Contrast: measure 100% and 96% (code 245). Unclipped, Y96/Y100 = (245/255)^2.2; clipping
   pushes it toward 1 and one channel clipping first shows as a 96%-vs-100% chromaticity
   shift. Walk up while ratio ≤ gamma + 1% and shift ≤ ΔE 1.0 (or down if already clipping)
@@ -307,6 +310,9 @@ Phase 1 — White Balance (two-point):
 - Pass 1 (`ctemp_select`): gains reset to `wb_gain_ceiling` (126 = menu 50, neutral), then a
   1-D search over the Color Temp preset (`CTEMP`, ~10 positions across 0–255 → `nudge` tries
   up to 40 raw units) for the white nearest D65 — the gains then barely have to move
+- Offsets use `_wb_offset_point`: one channel per move, a few notches, per-notch effect
+  re-estimated (signed) from every move — the gains' proportional formula overshot badly
+  (one blue notch: ΔE 3.6 → 13.7 at 30% grey)
 - Gains on white, then offsets (`OFFSETR/G/B`) on `wb_offset_patch` (default grey30),
   repeated up to `wb_two_point_rounds` (3) until a round needs no correction at either
   point; falls back to gain-only if the projector rejects `OFFSETR?`
@@ -342,6 +348,13 @@ Automatic (`"auto"`, default; needs `cms_menu`, never in dry runs):
   Brightness → Right/Left = ±1 menu step → Esc×3 closes. Right on Hue = toward the next
   colour on the hue wheel (the slider is labelled, e.g. red M◀▶Y)
 - The open panel doesn't change readings at screen centre, so the loop measures with it open
+- `cms_reset` (default on): each control is first returned to 50 with the remote's Default key
+  (`KEY 88` resets only the selected control, no confirmation) — absolute values are then
+  known (`RgbcmyMenu.values` → `report.cms_values`, storable in profiles)
+- `cms_sat_levels` (default `[75, 100]`): every iteration measures the axis at each level;
+  the loop minimises the mean ΔE and converges when the worst level is under target. On the
+  5040UB, correcting 100% alone (red Hue +19) left red at 75% saturation ΔE 7.7 (hue off by
+  14°) — the projector's CMS rotates mid-saturations differently from full colour
 - Loop per axis: measure → `cms_errors` (hue °, chroma %, L*) → move the control with the
   largest error/noise ratio by `round(err / gain)` steps (≤ 8, ≤ ±30 total) → re-measure.
   Each control's gain (error per step, signed) is re-estimated from every move above the
