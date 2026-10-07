@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import socket
 import threading
+import time
 
 import pytest
 
@@ -75,8 +76,13 @@ def test_limited_range_scales_to_16_235_full_screen():
     with PGenClient("127.0.0.1", fake.port, patch_settle_ms=0) as pgen:
         pgen.display_patch(RGBPatch(255, 0, 128))
     assert fake.patches()[0] == "RGB=RECTANGLE;3840,2160;0;235,16,126;235,126,16;0,0,0,0;-1"
-    # disconnect blanks the screen, then says goodbye
+    # disconnect blanks the screen, then says goodbye (QUIT gets no reply, so
+    # give the fake's thread a moment to record it)
     assert fake.patches()[-1].split(";")[3] == "16,16,16"
+    for _ in range(100):
+        if fake.received[-1] == "QUIT":
+            break
+        time.sleep(0.01)
     assert fake.received[-1] == "QUIT"
 
 

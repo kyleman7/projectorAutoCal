@@ -83,11 +83,12 @@ class PGenConfig:
     patch_settle_ms: int = 500
     # Switch the Pi's HDMI output to the run's signal mode (SDR / HDR10)
     configure_output: bool = True
-    # rgb | ycbcr444 | ycbcr422. HDR10 is 10-bit; at 4K30 that may exceed the
-    # 5040UB's HDMI bandwidth in RGB/4:4:4, and 4:2:2 costs nothing on
-    # full-field patches.
+    # rgb | ycbcr444 | ycbcr422. HDR10 must be RGB: with YCbCr the Pi labels
+    # the signal BT.2020-RGB (colorimetry 9) and the 5040UB decodes it as
+    # BT.709 (orange red); BT.2020-YCC (10) gave a green screen. 4K30 RGB
+    # 10-bit locks fine on the 5040UB (verified 2026-10-07).
     sdr_color_format: str = "rgb"
-    hdr_color_format: str = "ycbcr422"
+    hdr_color_format: str = "rgb"
 
     def __post_init__(self) -> None:
         if not self.host:
@@ -317,7 +318,7 @@ def _build_config(data: dict) -> Config:
             patch_settle_ms=int(pgen_raw.get("patch_settle_ms", 500)),
             configure_output=bool(pgen_raw.get("configure_output", True)),
             sdr_color_format=str(pgen_raw.get("sdr_color_format", "rgb")),
-            hdr_color_format=str(pgen_raw.get("hdr_color_format", "ycbcr422")),
+            hdr_color_format=str(pgen_raw.get("hdr_color_format", "rgb")),
         )
 
         cal_raw = data.get("calibration", {})

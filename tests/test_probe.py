@@ -46,12 +46,12 @@ def test_dead_link_raises_before_probing():
 
 def test_live_projector_resolves_tokens():
     proj = LiveProjector({"GAINR": "126", "GAING": "111", "GAINB": "108",
-                          "CMODE": "07", "DYNRANGE": "10"})
+                          "CMODE": "07", "DYNRANGE": "10", "LUMINANCE": "02"})
     result = run_probe(proj)  # type: ignore[arg-type]
     assert result.wb_slots["R"].accepted_token == "GAINR"
     assert result.missing_slots() == []
     table = result.to_command_table()
-    assert table["picture_mode"]["hdr10"] == [["DYNRANGE", "05"]]
+    assert table["picture_mode"]["hdr10"] == [["CMODE", "15"], ["LUMINANCE", "00"], ["DYNRANGE", "02"]]
     assert "cms" not in table
     assert is_command_table_complete(table)
 

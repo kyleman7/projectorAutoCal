@@ -47,7 +47,11 @@ WB_CANDIDATES: dict[str, list[str]] = {
 # HDR. The server restores the previous DYNRANGE after the run.
 PICTURE_MODE_PRESETS: dict[str, list[list[str]]] = {
     "sdr":   [["DYNRANGE", "01"], ["CMODE", "07"]],   # SDR, Natural — closest to Rec.709
-    "hdr10": [["DYNRANGE", "05"]],   # HDR Mode 4 — darkest / most accurate
+    # Cinema (P3 filter, best contrast of the P3 modes), High lamp, HDR Mode 1
+    # (brightest tone mapping — a 115" screen peaks ~27 cd/m² in HDR). Its own
+    # color mode keeps HDR settings away from SDR's (Natural); lamp power is
+    # stored per color mode.
+    "hdr10": [["CMODE", "15"], ["LUMINANCE", "00"], ["DYNRANGE", "02"]],
 }
 
 
@@ -119,7 +123,7 @@ class ProbeResult:
             for mode, steps in self.picture_mode.items():
                 lines.append(f"  {mode}: " + ", ".join(f"{c} {v}" for c, v in steps))
         else:
-            lines.append("  ✗ CMODE/DYNRANGE not supported — switch modes manually")
+            lines.append("  ✗ CMODE/DYNRANGE/LUMINANCE not supported — switch modes manually")
 
         lines.append("\nCMS: not available over ESC/VP21 — guided manual adjustment in phase 2")
 
@@ -195,7 +199,7 @@ def run_probe(
     # ---- Picture Mode --------------------------------------------------------
     _report("Probing picture mode commands…")
     supported = {}
-    for token in ("CMODE", "DYNRANGE"):
+    for token in ("CMODE", "DYNRANGE", "LUMINANCE"):
         accepted, value = projector.probe_command(token)
         time.sleep(_INTER_PROBE_SLEEP)
         supported[token] = accepted

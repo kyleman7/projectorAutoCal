@@ -188,8 +188,9 @@ peak white. Patches are full-screen; `display_window` draws a centred box.
 At the start of every run the server calls `configure_output(mode, color_format)`
 (`pgen.configure_output`, default on): SDR → SDR, BT.709, 8-bit, `pgen.sdr_color_format`
 (rgb); HDR10 → HDR, PQ, BT.2020, P3 primaries, 10-bit, `pgen.hdr_color_format`
-(ycbcr422 — 10-bit RGB/4:4:4 at 4K30 may exceed the 5040UB's HDMI bandwidth; 4:2:2
-loses nothing on full-field patches). Only differing settings are written, and
+(**rgb** — with YCbCr the Pi labels the signal colorimetry 9 = BT.2020 *RGB*, and the
+5040UB then decodes BT.2020 as BT.709 (red came out orange, x 0.617); colorimetry 10 =
+BT.2020 YCC produced a green screen. 4K30 RGB 10-bit locks fine). Only differing settings are written, and
 PGenerator is restarted only if something changed. HDR metadata is left as set on
 the Pi. Reconnect once on a dropped connection.
 
@@ -395,13 +396,17 @@ Max iterations per patch: 20 (configurable)
 ### 5040UB HDR Specifics
 
 - HDR10 only (no HLG, no Dolby Vision)
-- Peak brightness: ~100-110 nits
-- HDR has 4 modes; Mode 4 is darkest/most accurate for calibration
-- WB and CMS are accessible in HDR mode
-- SDR and HDR settings are **completely separate** — calibrate each independently
-- `DYNRANGE 05` (HDR Mode 4) is forced for HDR10 runs; the Pi is switched to an HDR10 signal
-- The gamma phase is skipped in HDR10 (the projector tone-maps PQ; gamma 2.2 doesn't apply)
-- Unverified: that the 5040UB locks to 4K30 10-bit 4:2:2 HDR from the Pi
+- Image settings live **per color mode**, not per SDR/HDR (reviewers: switching to HDR
+  changes no other settings). So HDR10 calibrates in its own mode: preset
+  `hdr10: CMODE 15 (Cinema), LUMINANCE 00 (High), DYNRANGE 02 (HDR Mode 1)`; SDR stays in
+  Natural. The server restores CMODE and DYNRANGE after every run (lamp power is per mode,
+  so Cinema keeps High)
+- Why Cinema: P3 filter (red 0.669/0.322) and by far the best contrast of the P3 modes
+  (black below the colorimeter's floor; Digital Cinema measured 223:1)
+- Why HDR Mode 1: brightest tone mapping. Measured in Cinema/High: 100-nit PQ white →
+  4.6 cd/m², 1000-nit → 27.3 cd/m² (115" screen). Mode 4 is far darker
+- Levels and gamma phases are SDR methods — HDR10 runs use `phases: ["wb", "cms"]`
+  (`POST /api/run` accepts an explicit `phases` list)
 
 ---
 
@@ -531,7 +536,7 @@ Results cached to `discovery/last_scan.json` (gitignored).
     "ccss_path": "configs/ccss/epson_tw9400_5050ub_i1pro.ccss"
   },
   "pgen": { "host": "192.168.1.101", "port": 85, "patch_settle_ms": 500,
-            "configure_output": true, "sdr_color_format": "rgb", "hdr_color_format": "ycbcr422" },
+            "configure_output": true, "sdr_color_format": "rgb", "hdr_color_format": "rgb" },
   "calibration": {
     "delta_e_threshold": 1.0, "max_iterations_per_patch": 20,
     "wb_gain_center": 128, "wb_gain_range": [0, 255], "wb_gain_min_step": 3,
