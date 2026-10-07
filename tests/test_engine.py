@@ -1026,3 +1026,35 @@ class TestLearnedOffsets:
         result = engine._wb_offset_point("grey30")
         assert result.final_de < 0.5, f"ΔE {result.final_de}"
         assert result.iterations <= 12
+
+
+class TestSpreadWhiteBalance:
+    def test_balancing_white_and_80_percent_splits_mid_scale_tint(self):
+        """Green tracks a little darker mid-scale (as on the 5040UB); balancing
+        gains on white alone leaves 80 % magenta, white + 80 % halves the worst."""
+        from projector_cal.color_math import delta_e_2000, get_target_lab, xyz_to_lab
+
+        def worst_after(patches):
+            proj = FakeProjector(wb={"R": 128, "G": 128, "B": 128})
+            display = FakeDisplay()
+
+            def measure():
+                v = display.current[1] / 255
+                out = []
+                for ch, ref, gamma in zip("RGB", _D65, (2.2, 2.32, 2.2)):
+                    gain = 1 + (proj.wb[ch] - 128) / 512
+                    out.append(ref * gain * v ** gamma * 0.6)
+                return tuple(out)
+
+            engine = CalibrationEngine(projector=proj, display=display, measure=measure,
+                                       config=make_config(wb_gain_patches=patches, correction_target=0.2))
+            engine._wb_point("white", "gain")
+            worst = 0.0
+            for name in ("white", "grey80"):
+                display.display_patch(engine._patch(name))
+                X, Y, Z = measure()
+                k = 100 / Y
+                worst = max(worst, delta_e_2000(xyz_to_lab(X * k, Y * k, Z * k), get_target_lab("white", "sdr")))
+            return worst
+
+        assert worst_after(["white", "grey80"]) < 0.7 * worst_after(["white"])

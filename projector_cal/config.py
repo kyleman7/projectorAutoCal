@@ -118,6 +118,9 @@ class CalibrationConfig:
     # Two-point white balance: offsets are tuned on this grey; gain/offset
     # rounds repeat until neither point needs a correction
     wb_offset_patch: str = "grey30"
+    # Greys whose mean chromaticity the gains are balanced on ("white" alone =
+    # classic high point; adding e.g. "grey80" splits mid-scale tint error)
+    wb_gain_patches: list[str] = field(default_factory=lambda: ["white"])
     wb_two_point_rounds: int = 3
     # ΔE the correction loops aim for; None = delta_e_threshold (the
     # verification pass/fail line). Finer targets cost iterations.
@@ -169,6 +172,11 @@ class CalibrationConfig:
             raise ConfigError("calibration.wb_offset_patch must be grey10…grey90")
         if not (0 < self.hdr_white_nits <= 10000):
             raise ConfigError("calibration.hdr_white_nits must be in (0, 10000]")
+        if not self.wb_gain_patches or any(
+            p != "white" and p not in {f"grey{g}" for g in (5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 95)}
+            for p in self.wb_gain_patches
+        ):
+            raise ConfigError("calibration.wb_gain_patches must be 'white' and/or ramp greys")
         if self.wb_two_point_rounds < 1:
             raise ConfigError("calibration.wb_two_point_rounds must be >= 1")
         if self.cms_mode not in ("auto", "guided"):
@@ -325,6 +333,7 @@ def _build_config(data: dict) -> Config:
                 cal_raw.get("cms_axis_order", ["red", "green", "blue", "cyan", "magenta", "yellow"])
             ),
             wb_offset_patch=str(cal_raw.get("wb_offset_patch", "grey30")),
+            wb_gain_patches=[str(v) for v in cal_raw.get("wb_gain_patches", ["white"])],
             wb_two_point_rounds=int(cal_raw.get("wb_two_point_rounds", 3)),
             correction_target=(None if cal_raw.get("correction_target") is None
                                else float(cal_raw["correction_target"])),

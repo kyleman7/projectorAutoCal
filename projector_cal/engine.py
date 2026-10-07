@@ -360,6 +360,7 @@ class CalibrationEngine:
         target_lab: tuple[float, float, float],
         compute_corrections: Callable[[tuple, tuple, dict, float], dict],
         apply_settings: Callable[[dict, dict], None],
+        measure: Callable[[], tuple[float, float, float]] | None = None,
     ) -> _LoopOutcome:
         """Drive one patch's correction loop until convergence or a stop condition.
 
@@ -375,6 +376,7 @@ class CalibrationEngine:
                 projector (unless dry-run), and mutates `settings`.
         """
         cfg = self.config
+        measure = measure or self.measure
         threshold = self._target
         step_scale = cfg.proportional_gain_initial
         initial_de: float | None = None
@@ -395,7 +397,7 @@ class CalibrationEngine:
                 break
 
             self.on_event({"event": "patch_start", "patch": patch_name, "iteration": iteration, "mode": mode})
-            X, Y, Z = self.measure()
+            X, Y, Z = measure()
             norm_xyz = normalize((X, Y, Z))
             meas_lab = xyz_to_lab(*norm_xyz)
             de = delta_e_2000(meas_lab, target_lab)
@@ -438,7 +440,7 @@ class CalibrationEngine:
             # Settings changed after the last reading (final-iteration correction
             # or divergence revert) — re-measure once so the reported result
             # reflects the projector's actual final state.
-            X, Y, Z = self.measure()
+            X, Y, Z = measure()
             final_de = delta_e_2000(xyz_to_lab(*normalize((X, Y, Z))), target_lab)
 
         if not converged:
@@ -983,7 +985,27 @@ class CalibrationEngine:
         def apply(current: dict, new: dict) -> None:
             self._apply_settings(patch, current, new, names, put, read_back=get)
 
-        return self._correction_loop(patch, "wb", values, normalize, target_lab, corrections, apply)
+        measure = None
+        spread = [p for p in (cfg.wb_gain_patches if kind == "gain" else [patch])]
+        if len(spread) > 1:
+            # Balance white over several greys: the 5040UB's channels don't
+            # track each other between the two WB points (magenta tint peaking
+            # at 70–80 % with white and 30 % neutral), so judging gains on the
+            # mean chromaticity of e.g. white + 80 % splits that error instead
+            # of putting all of it mid-scale.
+            def measure() -> tuple[float, float, float]:
+                acc = [0.0, 0.0, 0.0]
+                for q in spread:
+                    X, Y, Z = self._measure_patch(self._patch(q))
+                    k = 100.0 / Y if Y > 1e-6 else 1.0
+                    acc = [a + v * k / len(spread) for a, v in zip(acc, (X, Y, Z))]
+                return tuple(acc)  # type: ignore[return-value]
+
+        outcome = self._correction_loop(patch, "wb", values, normalize, target_lab, corrections, apply, measure)
+        if measure is not None:
+            self._measure_white_reference()   # the loop's readings are normalized, not absolute
+            outcome.xyz = (outcome.xyz[0], self._ref_white_Y or outcome.xyz[1], outcome.xyz[2])
+        return outcome
 
     # ------------------------------------------------------------------
     # Gamma — custom gamma points
