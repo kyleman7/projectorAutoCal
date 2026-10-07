@@ -1135,3 +1135,17 @@ class TestHdrLevels:
         assert proj.settings["BRIGHT"] < 126                 # deeper black than factory
         # Lowered Brightness delays highlight clipping to ~148 in this model
         assert 140 <= proj.settings["CONTRAST"] <= 150       # brighter, stopped at clipping
+
+
+class TestHdrCmsControls:
+    def test_hdr_cms_moves_only_the_allowed_controls(self):
+        proj = FakeProjector()
+        menu = FakeMenu(proj)
+        engine = CalibrationEngine(projector=proj, display=FakeDisplay(), measure=cms_measure(proj, "red"),
+                                   config=make_config(), cms_menu=menu, mode="hdr10")
+        engine._ref_white_Y = 60.0
+        engine._tone = [(50.0, 50.0)]          # identity-ish curve; skip measuring it
+        engine._measure_tone_curve = lambda: None
+        engine._phase2_cms()
+        assert menu.offsets["red"]["SAT"] == 0 and menu.offsets["red"]["LUM"] == 0
+        assert menu.offsets["red"]["HUE"] != 0

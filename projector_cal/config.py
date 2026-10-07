@@ -121,6 +121,14 @@ class CalibrationConfig:
     wb_offset_patch: str = "grey30"
     # HDR10: dark greys are too dim to measure reliably (30 % ≈ 0.3 cd/m²)
     hdr_wb_offset_patch: str = "grey50"
+    # HDR10 balances gains on white alone: the tone mapping pulls the channels
+    # further apart between 80 % and 100 % than in SDR, so averaging with 80 %
+    # left HDR white tinted (ΔE 3–4)
+    hdr_wb_gain_patches: list[str] = field(default_factory=lambda: ["white"])
+    # HDR10 CMS controls: the projector's HDR processing can't reach P3
+    # saturation (every primary 6–12 % short even at +30), so only hue is
+    # corrected — chasing saturation just drives the controls to their limits
+    hdr_cms_controls: list[str] = field(default_factory=lambda: ["HUE"])
     # Greys whose mean chromaticity the gains are balanced on ("white" alone =
     # classic high point; adding e.g. "grey80" splits mid-scale tint error)
     wb_gain_patches: list[str] = field(default_factory=lambda: ["white"])
@@ -182,6 +190,8 @@ class CalibrationConfig:
             raise ConfigError("calibration.wb_gain_patches must be 'white' and/or ramp greys")
         if self.wb_two_point_rounds < 1:
             raise ConfigError("calibration.wb_two_point_rounds must be >= 1")
+        if not self.hdr_cms_controls or any(c not in ("HUE", "SAT", "LUM") for c in self.hdr_cms_controls):
+            raise ConfigError("calibration.hdr_cms_controls must be drawn from HUE, SAT, LUM")
         if self.cms_mode not in ("auto", "guided"):
             raise ConfigError("calibration.cms_mode must be auto or guided")
         if not self.cms_sat_levels or any(v not in (25, 50, 75, 100) for v in self.cms_sat_levels):
@@ -337,6 +347,8 @@ def _build_config(data: dict) -> Config:
             ),
             wb_offset_patch=str(cal_raw.get("wb_offset_patch", "grey30")),
             hdr_wb_offset_patch=str(cal_raw.get("hdr_wb_offset_patch", "grey50")),
+            hdr_wb_gain_patches=[str(v) for v in cal_raw.get("hdr_wb_gain_patches", ["white"])],
+            hdr_cms_controls=[str(v).upper() for v in cal_raw.get("hdr_cms_controls", ["HUE"])],
             wb_gain_patches=[str(v) for v in cal_raw.get("wb_gain_patches", ["white"])],
             wb_two_point_rounds=int(cal_raw.get("wb_two_point_rounds", 3)),
             correction_target=(None if cal_raw.get("correction_target") is None

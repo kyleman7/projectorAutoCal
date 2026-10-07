@@ -1069,7 +1069,8 @@ class CalibrationEngine:
             self._apply_settings(patch, current, new, names, put, read_back=get)
 
         measure = None
-        spread = [p for p in (cfg.wb_gain_patches if kind == "gain" else [patch])]
+        gain_patches = cfg.hdr_wb_gain_patches if self.mode == "hdr10" else cfg.wb_gain_patches
+        spread = [p for p in (gain_patches if kind == "gain" else [patch])]
         if len(spread) > 1:
             # Balance white over several greys: the 5040UB's channels don't
             # track each other between the two WB points (magenta tint peaking
@@ -1379,7 +1380,8 @@ class CalibrationEngine:
             def wanted(c: str) -> int:
                 return 1 if errs[c] * gains[c] > 0 else -1
 
-            usable = [c for c in _CMS_CONTROLS if blocked.get(c) != wanted(c)]
+            allowed = cfg.hdr_cms_controls if self.mode == "hdr10" else _CMS_CONTROLS
+            usable = [c for c in allowed if blocked.get(c) != wanted(c)]
             if not usable:
                 logger.warning("CMS %s: every useful control is at a menu limit", axis)
                 break
