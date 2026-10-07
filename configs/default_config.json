@@ -34,6 +34,7 @@
     "proportional_gain_minimum": 0.1,
     "cms_axis_order": ["red", "green", "blue", "cyan", "magenta", "yellow"],
     "wb_offset_patch": "grey30",
+    "wb_gain_patches": ["white", "grey80"],
     "wb_two_point_rounds": 3,
     "correction_target": 0.5,
     "calibration_passes": 3,

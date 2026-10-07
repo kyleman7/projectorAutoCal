@@ -310,6 +310,12 @@ Phase 1 — White Balance (two-point):
 - Pass 1 (`ctemp_select`): gains reset to `wb_gain_ceiling` (126 = menu 50, neutral), then a
   1-D search over the Color Temp preset (`CTEMP`, ~10 positions across 0–255 → `nudge` tries
   up to 40 raw units) for the white nearest D65 — the gains then barely have to move
+- `wb_gain_patches` (default config `["white", "grey80"]`): gains are judged on the mean
+  chromaticity of these greys. The 5040UB's channels don't track between the WB points
+  (magenta tint peaking at 70–80%); balancing white alone gave greys+white mean ΔE 1.27 /
+  max 2.28, white+80% gave 0.80 / 1.68 (white itself 0.32 → 1.17) — measured 2026-10-07
+- One offset notch is coarse at 30% grey (blue ~6% per notch), so the offset point lands
+  near ΔE 0.3–1.0 rather than under 0.5 reliably — a hardware resolution limit
 - Offsets use `_wb_offset_point`: one channel per move, a few notches, per-notch effect
   re-estimated (signed) from every move — the gains' proportional formula overshot badly
   (one blue notch: ΔE 3.6 → 13.7 at 30% grey)
