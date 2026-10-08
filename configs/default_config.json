@@ -22,7 +22,7 @@
     "patch_settle_ms": 500,
     "configure_output": true,
     "sdr_color_format": "rgb",
-    "hdr_color_format": "rgb"
+    "hdr_color_format": "ycbcr422"
   },
   "calibration": {
     "delta_e_threshold": 1.0,

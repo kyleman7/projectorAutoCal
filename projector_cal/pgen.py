@@ -252,7 +252,8 @@ class PGenClient:
         else:
             logger.warning("Unrecognized PGenerator mode %r — assuming %dx%d", mode, *self._size)
         self._limited_range = self._query("GET_PGENERATOR_CONF_RGB_QUANT_RANGE") == "1"
-        self._bits = 10 if self._query("GET_PGENERATOR_CONF_MAX_BPC") == "10" else 8
+        # Any depth above 8 takes 10-bit patch codes (12-bit output included)
+        self._bits = 10 if int(self._query("GET_PGENERATOR_CONF_MAX_BPC") or 8) >= 10 else 8
         self._format = self._query("GET_PGENERATOR_CONF_COLOR_FORMAT")
 
     def _restart(self) -> None:

@@ -88,7 +88,7 @@ class PGenConfig:
     # BT.709 (orange red); BT.2020-YCC (10) gave a green screen. 4K30 RGB
     # 10-bit locks fine on the 5040UB (verified 2026-10-07).
     sdr_color_format: str = "rgb"
-    hdr_color_format: str = "rgb"
+    hdr_color_format: str = "ycbcr422"
 
     def __post_init__(self) -> None:
         if not self.host:
@@ -330,7 +330,7 @@ def _build_config(data: dict) -> Config:
             patch_settle_ms=int(pgen_raw.get("patch_settle_ms", 500)),
             configure_output=bool(pgen_raw.get("configure_output", True)),
             sdr_color_format=str(pgen_raw.get("sdr_color_format", "rgb")),
-            hdr_color_format=str(pgen_raw.get("hdr_color_format", "rgb")),
+            hdr_color_format=str(pgen_raw.get("hdr_color_format", "ycbcr422")),
         )
 
         cal_raw = data.get("calibration", {})

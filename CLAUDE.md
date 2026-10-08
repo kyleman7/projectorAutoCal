@@ -188,9 +188,14 @@ peak white. Patches are full-screen; `display_window` draws a centred box.
 At the start of every run the server calls `configure_output(mode, color_format)`
 (`pgen.configure_output`, default on): SDR → SDR, BT.709, 8-bit, `pgen.sdr_color_format`
 (rgb); HDR10 → HDR, PQ, BT.2020, P3 primaries, 10-bit, `pgen.hdr_color_format`
-(**rgb** — with YCbCr the Pi labels the signal colorimetry 9 = BT.2020 *RGB*, and the
-5040UB then decodes BT.2020 as BT.709 (red came out orange, x 0.617); colorimetry 10 =
-BT.2020 YCC produced a green screen. 4K30 RGB 10-bit locks fine). Only differing settings are written, and
+(**ycbcr422**). Signal matrix measured 2026-10-08 (projector Info page read via webcam):
+the 5040UB's EDID caps TMDS at 340 MHz, so at 4K24/30 RGB and YCbCr 4:4:4 above 8-bit give
+**no picture**; 4K YCbCr 4:2:2 arrives as "12 bit 4:2:2 BT.2020 HDR" and is the only >8-bit
+4K path (and what UHD players send). RGB 8-bit works but is 8-bit; 1080p24 RGB 12-bit works.
+All working formats decode the same chromaticities, but RGB and YCbCr differ in luminance
+(RGB white ~10% dimmer, 50% grey ~25% brighter relative to white), so calibrate in the
+format the sources use. Colorimetry 10 still gives a green screen. Any MAX_BPC > 8 takes
+10-bit patch codes (`_read_output`)). Only differing settings are written, and
 PGenerator is restarted only if something changed. HDR metadata is left as set on
 the Pi. Reconnect once on a dropped connection.
 
@@ -553,7 +558,7 @@ Results cached to `discovery/last_scan.json` (gitignored).
     "ccss_path": "configs/ccss/epson_tw9400_5050ub_i1pro.ccss"
   },
   "pgen": { "host": "192.168.1.101", "port": 85, "patch_settle_ms": 500,
-            "configure_output": true, "sdr_color_format": "rgb", "hdr_color_format": "rgb" },
+            "configure_output": true, "sdr_color_format": "rgb", "hdr_color_format": "ycbcr422" },
   "calibration": {
     "delta_e_threshold": 1.0, "max_iterations_per_patch": 20,
     "wb_gain_center": 128, "wb_gain_range": [0, 255], "wb_gain_min_step": 3,
