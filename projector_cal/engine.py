@@ -83,7 +83,11 @@ _OFFSET_MAX_NOTCHES = 4
 _HDR_LEVEL_REFERENCE = 126
 _HDR_NEAR_BLACK_CODE = 26      # 10 % grey → ~0.6-nit PQ stimulus (100-nit white)
 _HDR_CLIP_HIGH_NITS = 1000     # highlight pair whose ratio reveals clipping
-_HDR_CLIP_LOW_NITS = 600
+# 600 nits already clipped on the 5040UB in Natural/HDR1 (everything above
+# ~400 nits reads the same), so the 600/1000 ratio never moved and Contrast
+# ran to 228, clipping from 200 nits. 200 nits stays below the clip point.
+_HDR_CLIP_LOW_NITS = 200
+_HDR_CLIP_UNUSABLE = 0.97      # pair already clipped at the reference → don't tune
 _HDR_CLIP_RATIO_TOL = 0.01
 
 # Gamma solver
@@ -681,7 +685,7 @@ class CalibrationEngine:
         logger.info("HDR Brightness %d → %d", start, best)
 
     def _tune_contrast_hdr(self, span: int) -> None:
-        """HDR10: highest Contrast before highlights clip — Y(600 nit)/Y(1000 nit)
+        """HDR10: highest Contrast before highlights clip — Y(200 nit)/Y(1000 nit)
         stays at its factory-default ratio and the highlight doesn't tint."""
         hi = RGBPatch(*(pq_code10(_HDR_CLIP_HIGH_NITS),) * 3, bits=10)
         lo = RGBPatch(*(pq_code10(_HDR_CLIP_LOW_NITS),) * 3, bits=10)
@@ -699,6 +703,14 @@ class CalibrationEngine:
         if self._hdr_clip_ref is None:
             self._hdr_clip_ref = sample()[0]
         ref = self._hdr_clip_ref
+        if ref > _HDR_CLIP_UNUSABLE:
+            # Both highlights already clip at the reference: the ratio can't
+            # reveal more clipping, so raising Contrast would go unchecked
+            logger.warning("HDR Contrast: %d/%d-nit highlights already clip at %d — leaving Contrast there",
+                           _HDR_CLIP_LOW_NITS, _HDR_CLIP_HIGH_NITS, _HDR_LEVEL_REFERENCE)
+            self.on_event({"event": "warning", "message":
+                "HDR highlights already clip at the reference Contrast; Contrast left at the reference."})
+            return
         current = best = int(self.projector.get_setting("CONTRAST"))
         for _ in range(4 * span):
             moved = self._step_setting("CONTRAST", +1)
@@ -707,8 +719,8 @@ class CalibrationEngine:
             current = moved
             ratio, shift = sample()
             clean = ratio <= ref + _HDR_CLIP_RATIO_TOL and shift <= _CLIP_CHROMA_DE
-            logger.info("HDR Contrast %d: 600/1000-nit %.4f (factory %.4f), tint %.2f → %s",
-                        current, ratio, ref, shift, "clean" if clean else "clipping")
+            logger.info("HDR Contrast %d: %d/%d-nit %.4f (factory %.4f), tint %.2f → %s",
+                        current, _HDR_CLIP_LOW_NITS, _HDR_CLIP_HIGH_NITS, ratio, ref, shift, "clean" if clean else "clipping")
             if not clean:
                 break
             best = current
@@ -1110,10 +1122,10 @@ class CalibrationEngine:
         self.on_event({"event": "phase_start", "phase": "gamma", "patch_count": len(greys)})
         results: list[PatchResult] = []
 
-        if self.mode != "sdr":
-            # HDR10 is PQ tone-mapped by the projector; a power-law target is wrong
-            logger.warning("Gamma phase skipped in %s mode — targets are SDR gamma 2.2", self.mode)
-            self.on_event({"event": "warning", "message": "Gamma calibration is SDR-only; skipped for HDR10."})
+        if self.mode != "sdr" and not self.config.hdr_gamma:
+            # HDR10 is PQ tone-mapped by the projector; without hdr_gamma it is left alone
+            logger.warning("Gamma phase skipped in %s mode (calibration.hdr_gamma is off)", self.mode)
+            self.on_event({"event": "warning", "message": "Gamma calibration is off for HDR10 (calibration.hdr_gamma)."})
             self.on_event({"event": "phase_done", "phase": "gamma"})
             return results
         try:
@@ -1297,9 +1309,11 @@ class CalibrationEngine:
         blocked: dict[str, int] = {}
         at_limit = self._cms_at_limit.setdefault(axis, set())
 
-        levels = cfg.cms_sat_levels
+        hdr = self.mode == "hdr10"
+        levels = cfg.hdr_cms_sat_levels if hdr else cfg.cms_sat_levels
         patches = [axis if lvl == 100 else f"{axis}_sat{lvl}" for lvl in levels]
         targets = {p: self._target_lab(p) for p in patches}
+        chroma_only = hdr and cfg.hdr_cms_chroma_only
         main = axis if axis in patches else patches[-1]
 
         menu.open_axis(axis)
@@ -1317,11 +1331,17 @@ class CalibrationEngine:
             des, errs_all, xyz_main = [], [], (0.0, 0.0, 0.0)
             for p in patches:
                 xyz = self._measure_patch(self._patch(p))
-                lab = xyz_to_lab(*self._to_relative(*xyz))
-                d = delta_e_2000(lab, targets[p])
+                rel = self._to_relative(*xyz)
+                lab = xyz_to_lab(*rel)
+                target = targets[p]
+                if chroma_only:
+                    # Same chromaticity as the target, at the measured luminance
+                    x, y, _ = get_target_xyY(p, self.mode)
+                    target = xyz_to_lab(*xyY_to_XYZ(x, y, rel[1]))
+                d = delta_e_2000(lab, target)
                 self.on_event({"event": "measurement", "patch": p, "xyz": list(xyz), "delta_e": d})
                 des.append(d)
-                errs_all.append(cms_errors(lab, targets[p]))
+                errs_all.append(cms_errors(lab, target))
                 if p == main:
                     xyz_main = xyz
             errs = {c: sum(e[c] for e in errs_all) / len(errs_all) for c in _CMS_CONTROLS}
@@ -1380,7 +1400,7 @@ class CalibrationEngine:
             def wanted(c: str) -> int:
                 return 1 if errs[c] * gains[c] > 0 else -1
 
-            allowed = cfg.hdr_cms_controls if self.mode == "hdr10" else _CMS_CONTROLS
+            allowed = cfg.hdr_cms_controls if hdr else _CMS_CONTROLS
             usable = [c for c in allowed if blocked.get(c) != wanted(c)]
             if not usable:
                 logger.warning("CMS %s: every useful control is at a menu limit", axis)

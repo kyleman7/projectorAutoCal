@@ -125,10 +125,22 @@ class CalibrationConfig:
     # further apart between 80 % and 100 % than in SDR, so averaging with 80 %
     # left HDR white tinted (ΔE 3–4)
     hdr_wb_gain_patches: list[str] = field(default_factory=lambda: ["white"])
-    # HDR10 CMS controls: the projector's HDR processing can't reach P3
-    # saturation (every primary 6–12 % short even at +30), so only hue is
-    # corrected — chasing saturation just drives the controls to their limits
-    hdr_cms_controls: list[str] = field(default_factory=lambda: ["HUE"])
+    # HDR10 CMS controls. Brightness is left alone: HDR luminance is the tone
+    # mapping's job. Hue-only (the earlier default) drove hues to their limits
+    # and worsened the primaries; hue + saturation judged on chromaticity
+    # alone (hdr_cms_chroma_only) is what improved red/cyan/yellow
+    hdr_cms_controls: list[str] = field(default_factory=lambda: ["HUE", "SAT"])
+    # HDR10 CMS judges each patch on chromaticity only: the target is the
+    # target colour at the *measured* luminance, so ΔE carries no L* error
+    hdr_cms_chroma_only: bool = True
+    # HDR10 CMS saturation levels: 100 % P3 green/blue is out of reach, and
+    # chasing it distorts the in-between colours that content actually uses
+    hdr_cms_sat_levels: list[int] = field(default_factory=lambda: [50, 75])
+    # HDR10 custom gamma: let the gamma phase shape the projector's tone curve
+    # in HDR mode. Targets are the PQ-relative grey luminances the HDR patches
+    # encode (white = 100 nits). HDR1's toe crushes 10–30 % greys by 20–80 %,
+    # and Brightness can't fix it — it lifts 30–50 % as much as the shadows
+    hdr_gamma: bool = False
     # Greys whose mean chromaticity the gains are balanced on ("white" alone =
     # classic high point; adding e.g. "grey80" splits mid-scale tint error)
     wb_gain_patches: list[str] = field(default_factory=lambda: ["white"])
@@ -194,8 +206,10 @@ class CalibrationConfig:
             raise ConfigError("calibration.hdr_cms_controls must be drawn from HUE, SAT, LUM")
         if self.cms_mode not in ("auto", "guided"):
             raise ConfigError("calibration.cms_mode must be auto or guided")
-        if not self.cms_sat_levels or any(v not in (25, 50, 75, 100) for v in self.cms_sat_levels):
-            raise ConfigError("calibration.cms_sat_levels must be drawn from 25, 50, 75, 100")
+        for name in ("cms_sat_levels", "hdr_cms_sat_levels"):
+            levels = getattr(self, name)
+            if not levels or any(v not in (25, 50, 75, 100) for v in levels):
+                raise ConfigError(f"calibration.{name} must be drawn from 25, 50, 75, 100")
         if self.correction_target is not None and not (0 < self.correction_target <= self.delta_e_threshold):
             raise ConfigError("calibration.correction_target must be in (0, delta_e_threshold]")
         if self.calibration_passes < 1:
@@ -348,7 +362,10 @@ def _build_config(data: dict) -> Config:
             wb_offset_patch=str(cal_raw.get("wb_offset_patch", "grey30")),
             hdr_wb_offset_patch=str(cal_raw.get("hdr_wb_offset_patch", "grey50")),
             hdr_wb_gain_patches=[str(v) for v in cal_raw.get("hdr_wb_gain_patches", ["white"])],
-            hdr_cms_controls=[str(v).upper() for v in cal_raw.get("hdr_cms_controls", ["HUE"])],
+            hdr_cms_controls=[str(v).upper() for v in cal_raw.get("hdr_cms_controls", ["HUE", "SAT"])],
+            hdr_cms_chroma_only=bool(cal_raw.get("hdr_cms_chroma_only", True)),
+            hdr_cms_sat_levels=[int(v) for v in cal_raw.get("hdr_cms_sat_levels", [50, 75])],
+            hdr_gamma=bool(cal_raw.get("hdr_gamma", False)),
             wb_gain_patches=[str(v) for v in cal_raw.get("wb_gain_patches", ["white"])],
             wb_two_point_rounds=int(cal_raw.get("wb_two_point_rounds", 3)),
             correction_target=(None if cal_raw.get("correction_target") is None

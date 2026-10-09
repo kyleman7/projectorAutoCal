@@ -1142,10 +1142,98 @@ class TestHdrCmsControls:
         proj = FakeProjector()
         menu = FakeMenu(proj)
         engine = CalibrationEngine(projector=proj, display=FakeDisplay(), measure=cms_measure(proj, "red"),
-                                   config=make_config(), cms_menu=menu, mode="hdr10")
+                                   config=make_config(hdr_cms_controls=["HUE"], hdr_cms_sat_levels=[100],
+                                                      hdr_cms_chroma_only=False),
+                                   cms_menu=menu, mode="hdr10")
         engine._ref_white_Y = 60.0
         engine._tone = [(50.0, 50.0)]          # identity-ish curve; skip measuring it
         engine._measure_tone_curve = lambda: None
         engine._phase2_cms()
         assert menu.offsets["red"]["SAT"] == 0 and menu.offsets["red"]["LUM"] == 0
         assert menu.offsets["red"]["HUE"] != 0
+
+
+class TestHdrCmsChromaOnly:
+    def _engine(self, chroma_only):
+        from projector_cal.color_math import get_target_xyY, xyY_to_XYZ
+        proj = FakeProjector()
+        menu = FakeMenu(proj)
+        engine = CalibrationEngine(
+            projector=proj, display=FakeDisplay(), measure=lambda: (0, 0, 0),
+            config=make_config(hdr_cms_chroma_only=chroma_only, hdr_cms_sat_levels=[50, 75],
+                               max_iterations_per_patch=3),
+            cms_menu=menu, mode="hdr10",
+        )
+        engine._ref_white_Y = 100.0
+        engine._patch = lambda name: name
+        # Right chromaticity, but every colour 30 % darker than its target
+        engine._measure_patch = lambda name: xyY_to_XYZ(*get_target_xyY(name, "hdr10")[:2],
+                                                         get_target_xyY(name, "hdr10")[2] * 0.7)
+        return engine, proj
+
+    def test_luminance_error_alone_needs_no_correction(self):
+        engine, proj = self._engine(chroma_only=True)
+        result = engine._cms_axis_auto("red")
+        assert result.converged and result.final_delta_e < 0.01
+        assert proj.cms["red"] == {"HUE": 0, "SAT": 0, "LUM": 0}
+
+    def test_without_chroma_only_the_luminance_error_counts(self):
+        engine, _ = self._engine(chroma_only=False)
+        result = engine._cms_axis_auto("red")
+        assert not result.converged
+
+
+class TestHdrContrastClipGuard:
+    def _engine(self, measure_patch):
+        proj = FakeProjector(settings={"CONTRAST": 126})
+        engine = CalibrationEngine(projector=proj, display=FakeDisplay(), measure=lambda: (0, 0, 0),
+                                   config=make_config(), mode="hdr10")
+        engine._measure_patch = measure_patch
+        return engine, proj
+
+    def test_contrast_left_alone_when_highlights_already_clip(self):
+        """200 and 1000 nits reading the same means the ratio can't detect
+        clipping — Contrast must not be raised without limit."""
+        engine, proj = self._engine(lambda patch: (47.0, 49.0, 52.0))
+        engine._tune_contrast_hdr(span=10)
+        assert int(proj.settings["CONTRAST"]) == 126
+
+    def test_contrast_stops_when_200_nits_starts_clipping(self):
+        from projector_cal.color_math import pq_code10
+        engine, proj = None, None
+
+        def measure_patch(patch):
+            peak = 49.0
+            if patch.r == pq_code10(1000):
+                return (peak * 0.95, peak, peak * 1.09)
+            # 200-nit highlight brightens with Contrast and clips at the peak
+            y = min(peak, 31.0 * (1 + (int(proj.settings["CONTRAST"]) - 126) / 40))
+            return (y * 0.95, y, y * 1.09)
+
+        engine, proj = self._engine(measure_patch)
+        engine._tune_contrast_hdr(span=10)
+        assert 126 <= int(proj.settings["CONTRAST"]) <= 131
+
+
+class TestHdrGammaOption:
+    def _run(self, hdr_gamma):
+        proj = FakeProjector(settings={"GAMMA": "22", **{f"GAMMALV {i:02d}": 126 for i in range(9)}})
+        events = []
+        engine = CalibrationEngine(projector=proj, display=FakeDisplay(), measure=lambda: (95.0, 100.0, 108.0),
+                                   config=make_config(hdr_gamma=hdr_gamma), mode="hdr10", on_event=events.append)
+
+        def stop_after_first(*_):
+            engine._abort = True
+            return (95.0, 100.0, 108.0)
+        engine._measure_patch = stop_after_first
+        engine._phase_gamma()
+        return proj, events
+
+    def test_hdr_gamma_off_leaves_gamma_alone(self):
+        proj, events = self._run(False)
+        assert proj.settings["GAMMA"] == "22"
+        assert any(e["event"] == "warning" for e in events)
+
+    def test_hdr_gamma_on_runs_the_solver(self):
+        proj, _ = self._run(True)
+        assert proj.settings["GAMMA"] == "F0"

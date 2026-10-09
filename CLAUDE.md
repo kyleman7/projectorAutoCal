@@ -401,15 +401,19 @@ Max iterations per patch: 20 (configurable)
 ### 5040UB HDR Specifics
 
 - HDR10 only (no HLG, no Dolby Vision)
-- Image settings live **per color mode**, not per SDR/HDR (reviewers: switching to HDR
-  changes no other settings). So HDR10 calibrates in its own mode: preset
-  `hdr10: CMODE 15 (Cinema), LUMINANCE 00 (High), DYNRANGE 02 (HDR Mode 1)`; SDR stays in
-  Natural. The server restores CMODE and DYNRANGE after every run (lamp power is per mode,
-  so Cinema keeps High)
-- Why Cinema: P3 filter (red 0.669/0.322) and by far the best contrast of the P3 modes
-  (black below the colorimeter's floor; Digital Cinema measured 223:1)
-- Why HDR Mode 1: brightest tone mapping. Measured in Cinema/High: 100-nit PQ white →
-  4.6 cd/m², 1000-nit → 27.3 cd/m² (115" screen). Mode 4 is far darker
+- Image settings live **per color mode**, and projector **memories** (`PUSHMEM`/`POPMEM 02 xx`)
+  store everything — CMODE, lamp, Brightness/Contrast, CTEMP, gains, offsets, GAMMA + all
+  GAMMALV points, Image Enhancement **and RGBCMY** — but **not** `DYNRANGE` or `CLRSPACE`
+  (verified 2026-10-08 with the webcam). So SDR and HDR can share Natural: SDR in Memory 1,
+  HDR in Memory 2, Dynamic Range and Color Space left on Auto
+- HDR10 calibrates in **Natural, High lamp, HDR Mode 1** (preset
+  `[["CMODE","07"],["LUMINANCE","00"],["GAMMA","22"],["DYNRANGE","02"]]`). Survey 2026-10-08
+  through YCbCr 4:2:2 (100-nit white / peak, cd/m²): Cinema HDR1 4.8/24, Cinema HDR2 5.3/24,
+  Natural HDR1 14.0/48, Natural HDR2 12.6/49. Cinema's P3 filter gains little (mean Δu′v′
+  0.016 vs Natural 0.012; Natural can't reach 100 % P3 red) and HDR in Cinema was ~7× dimmer
+  than SDR. Every mode clips everything above ~400 nits
+- Firmware 1.11 added the brighter HDR1 (`DYNRANGE 10` = "Auto (Bright)" maps HDR to it);
+  the user's projector runs 1.14 (Main version string ends in 114)
 - Levels and gamma phases are SDR methods — HDR10 runs use `phases: ["wb", "cms"]`
   (`POST /api/run` accepts an explicit `phases` list)
 - `DYNRANGE 10` (not in Epson's list) is the menu's **"Auto (Bright)"** (Signal → Advanced,
@@ -421,10 +425,26 @@ Max iterations per patch: 20 (configurable)
   luminance the tone curve gives its stimulus (`_tone_map`, log–log interpolation). Verify
   measures white → greys → colours, rebuilding the curve from its own greys; greys are judged
   on tint only (`_neutral_at`). A `tone_curve` event reports the points
-- HDR levels (no gamma target to compare with): Brightness walks down from the factory 126
-  while a ~0.6-nit dark grey (code 26) keeps ≥ 80% of its step above black at 126; Contrast
-  walks up from 126 while Y(600 nit)/Y(1000 nit) stays within 0.01 of its factory ratio and
-  the highlight doesn't tint. Gamma isn't touched in HDR (the HDR mode is the tone curve)
+- HDR levels: Brightness walks down from the factory 126 while a ~0.6-nit dark grey (code 26)
+  keeps ≥ 80% of its step above black at 126; Contrast walks up from 126 while
+  Y(200 nit)/Y(1000 nit) stays within 0.01 of its factory ratio and the highlight doesn't
+  tint. The pair was 600/1000 — both already clipped in Natural/HDR1, so the ratio never moved
+  and Contrast ran to 228 (100-nit white 14 → 31 cd/m², clipping from 200 nits). If the pair
+  already clips at the reference (ratio > 0.97) Contrast is left there
+- HDR gamma (`hdr_gamma`, default config on): the gamma solver also runs in HDR, against the
+  PQ-relative grey luminances the HDR patches encode (white = 100 nits). HDR1's toe crushed
+  10–30 % greys by 22–80 %; Brightness can't fix it (lifts 30–50 % as much). With gamma:
+  20–90 % within −9…+15 % (mostly ±2 %), 30 % grey tint ΔE 3.2 → 0.07, peak 48 → 46 cd/m².
+  Gamma points 0–1 barely reach below 10 %, so 5–10 % stay dark. Offsets then use
+  `hdr_wb_offset_patch` grey30 (grey50 before; at 30 % the first pass still oscillates
+  until gamma lifts it)
+- HDR CMS judges chromaticity only (`hdr_cms_chroma_only`: target = target colour at the
+  measured luminance) at `hdr_cms_sat_levels` [50, 75] with Hue + Saturation. Hue-only drove
+  hues to their limits; ΔE with a tone-curve L* term hid real colour gains
+- Tested and rejected (2026-10-08): HDR10 shown in SDR mode + `CLRSPACE 02` (BT.2020; values
+  00 Auto / 01 BT.709 / 02 BT.2020) + custom gamma. Shadows fit well, but GAMMALV 07 moves
+  400–1000 nits only ±15 % (they collapse to one level) and 50 %-saturation colours were
+  20–30× worse than HDR1
 - HDR offsets use `hdr_wb_offset_patch` (grey50) — 30% grey is ~0.3 cd/m², too dim
 - HDR10 runs: `phases: ["levels", "wb", "cms"]`
 
