@@ -28,6 +28,7 @@ Usage:
 from __future__ import annotations
 
 import logging
+import re
 import socket
 import time
 from contextlib import contextmanager
@@ -40,6 +41,19 @@ _HANDSHAKE = bytes.fromhex("455343 2F56502E 6E657410 03000000 0000".replace(" ",
 _HANDSHAKE_ACK_LEN = 16
 _CR = b"\r"
 _ENCODING = "ascii"
+# Unsolicited status notices (power/signal changes) the projector pushes over the
+# network link, e.g. "IMEVENT=0001 03 00000002 00000000 T1 F1\r:". Left in the
+# buffer they are read as the reply to the next command, and every later reply
+# arrives one command late.
+_EVENT_RE = re.compile(r"IMEVENT=[^:]*:\s*")
+
+
+def _reply(buf: bytes) -> str | None:
+    """The complete reply in `buf` with event notices removed, or None if incomplete."""
+    decoded = _EVENT_RE.sub("", buf.decode(_ENCODING, errors="replace")).rstrip("\r\n")
+    if decoded.endswith(":") or "ERR" in decoded:
+        return decoded
+    return None
 
 
 class ProjectorError(Exception):
@@ -179,9 +193,9 @@ class TCPTransport:
             if not chunk:
                 raise ProjectorError("Connection closed by projector during receive")
             buf += chunk
-            decoded = buf.decode(_ENCODING, errors="replace").rstrip("\r\n")
-            if decoded.endswith(":") or "ERR" in decoded:
-                return decoded
+            reply = _reply(buf)
+            if reply is not None:
+                return reply
 
 
 # ---------------------------------------------------------------------------
@@ -288,9 +302,9 @@ class SerialTransport:
             chunk = self._ser.read(self._ser.in_waiting or 1)
             if chunk:
                 buf += chunk
-                decoded = buf.decode(_ENCODING, errors="replace").rstrip("\r\n")
-                if decoded.endswith(":") or "ERR" in decoded:
-                    return decoded
+                reply = _reply(buf)
+                if reply is not None:
+                    return reply
         raise ProjectorError(
             f"Serial read timed out after {self.command_timeout}s "
             f"(received so far: {buf!r})"

@@ -48,7 +48,8 @@
     "hdr_cms_controls": ["HUE", "SAT"], "hdr_cms_chroma_only": true, "hdr_cms_sat_levels": [50, 75],
     "hdr_gamma": true, "hdr_wb_offset_patch": "grey30",
     "apply_baseline_neutral": true,
-    "hdr_white_nits": 100
+    "hdr_white_nits": 100,
+    "target_gamma": 2.2, "ambient_compensation": false
   },
   "hdr": {
     "picture_mode_command": "PMOD",

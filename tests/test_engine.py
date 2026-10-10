@@ -1237,3 +1237,35 @@ class TestHdrGammaOption:
     def test_hdr_gamma_on_runs_the_solver(self):
         proj, _ = self._run(True)
         assert proj.settings["GAMMA"] == "F0"
+
+
+class TestLightsOn:
+    def test_ambient_floor_is_subtracted_from_every_reading(self):
+        """A warm room-light floor under a D65 projector white must not tint white."""
+        proj = FakeProjector()
+        display = FakeDisplay()
+        floor = (0.95, 0.87, 0.40)
+        white = tuple(c * 0.37 for c in D65_WHITE_XYZ)
+
+        def measure():
+            lin = (display.current[0] / 255) ** 2.2 if display.current else 0.0
+            return tuple(w * lin + f for w, f in zip(white, floor))
+
+        engine = CalibrationEngine(projector=proj, display=display, measure=measure,
+                                   config=make_config(ambient_compensation=True))
+        engine._measure_ambient()
+        assert engine._ambient == floor
+        display.display_patch(RGBPatch(255, 255, 255))
+        assert engine.measure() == pytest.approx(white)
+        display.display_patch(RGBPatch(0, 0, 0))
+        assert engine.measure() == pytest.approx((0.0, 0.0, 0.0))
+
+    def test_target_gamma_lifts_grey_and_sweep_targets_only(self):
+        from projector_cal.color_math import get_target_xyY
+        assert get_target_xyY("grey50", "sdr", 2.0)[2] == pytest.approx((128 / 255) ** 2.0 * 100)
+        assert get_target_xyY("grey50", "sdr", 2.2) == get_target_xyY("grey50", "sdr")
+        for name in ("white", "red", "cyan"):
+            assert get_target_xyY(name, "sdr", 2.0) == pytest.approx(get_target_xyY(name, "sdr"))
+        # a 75 % sweep's other channels rise with the lower gamma → less saturated, brighter
+        assert get_target_xyY("red_sat75", "sdr", 2.0)[2] > get_target_xyY("red_sat75", "sdr")[2]
+        assert get_target_xyY("red_sat75", "sdr", 2.0)[0] < get_target_xyY("red_sat75", "sdr")[0]

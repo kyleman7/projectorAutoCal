@@ -95,6 +95,8 @@ D:\projectorAutoCal\
 - SET command: `b"TOKEN VALUE\r"` → response `b":"` (success) or `b"ERR"`
 - QUERY command: `b"TOKEN?\r"` → response `b"TOKEN=VALUE:\r"`
 - Reconnect **once** on broken-pipe before raising `ProjectorError`
+- The projector pushes unsolicited `IMEVENT=… \r:` notices (power/signal changes) over the
+  network link; `_reply()` strips them, or every later reply arrives one command late
 - Always sleep `command_settle_ms` (default 200ms) after each SET
 
 ### ESC/VP21 Command Tokens
@@ -394,6 +396,21 @@ Phase 3 — Verification:
   each color (`red_sat50`: the colour blended with white in linear light — 1 on its own
   channels, 1 − sat on the others, gamma-2.2 encoded; target from the same additive model)
 - Record final ΔE for report
+
+Lights-on calibration (`calibration.ambient_compensation`, `calibration.target_gamma`; both off /
+2.2 by default):
+- `ambient_compensation`: after baseline the engine measures the black patch as the room-light
+  floor and wraps `self.measure` to subtract it — every target then applies to the projector's own
+  light. Without it, greys chase levels below the floor (shadows crush) and the warm room tint is
+  corrected into the greys. One lit room (2026-10-10): floor 0.85–0.95 cd/m², warm (x ≈ 0.43)
+- `target_gamma` (e.g. 2.0): grey and saturation-sweep *targets* use (code/255)^γ per channel
+  (`get_target_xyY(name, mode, gamma)`); the signal sent is unchanged. In HDR10 it applies to the
+  gamma phase's grey targets (relative to the 2.2-coded PQ stimulus); the tone-curve stimulus
+  axis and HDR patch codes stay on the base table
+- 5–10 % greys sit under the floor, so their tint reads ΔE ~4 after subtraction — invisible on screen
+- Contrast clip point depends on the signal path: 192 was clean via the Pi's RGB, ~111 via YCbCr
+  4:2:2 through the AVR + Linker (white didn't brighten above it). The SDR contrast back-off is
+  therefore uncapped
 
 Convergence threshold: ΔE < 1.0 (configurable, default 1.0)
 Max iterations per patch: 20 (configurable)

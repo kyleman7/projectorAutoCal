@@ -172,6 +172,13 @@ class CalibrationConfig:
     # HDR10 patches: luminance (cd/m²) of the "white" stimulus; every other
     # patch is PQ-encoded at its target luminance relative to it
     hdr_white_nits: float = 100.0
+    # Lights-on calibration. Grey and colour-sweep targets follow this display
+    # gamma instead of 2.2 (lower = brighter shadows); the signal is unchanged.
+    target_gamma: float = 2.2
+    # Measure the room-light floor (black patch) at the start of a run and
+    # subtract it from every reading, so targets apply to the projector's own
+    # light and the room's tint isn't corrected into the greys.
+    ambient_compensation: bool = False
 
     def __post_init__(self) -> None:
         if self.delta_e_threshold <= 0:
@@ -195,6 +202,8 @@ class CalibrationConfig:
             raise ConfigError("calibration.wb_offset_patch must be grey10…grey90")
         if not (0 < self.hdr_white_nits <= 10000):
             raise ConfigError("calibration.hdr_white_nits must be in (0, 10000]")
+        if not (1.0 <= self.target_gamma <= 3.0):
+            raise ConfigError("calibration.target_gamma must be in [1.0, 3.0]")
         if not self.wb_gain_patches or any(
             p != "white" and p not in {f"grey{g}" for g in (5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 95)}
             for p in self.wb_gain_patches
@@ -380,6 +389,8 @@ def _build_config(data: dict) -> Config:
             cms_sat_levels=[int(v) for v in cal_raw.get("cms_sat_levels", [75, 100])],
             apply_baseline_neutral=bool(cal_raw.get("apply_baseline_neutral", True)),
             hdr_white_nits=float(cal_raw.get("hdr_white_nits", 100.0)),
+            target_gamma=float(cal_raw.get("target_gamma", 2.2)),
+            ambient_compensation=bool(cal_raw.get("ambient_compensation", False)),
         )
 
         hdr_raw = data.get("hdr", {})

@@ -199,7 +199,24 @@ def delta_e_2000(lab1: tuple[float, float, float], lab2: tuple[float, float, flo
     return float(delta_e_cie2000(c1, c2))
 
 
-def get_target_xyY(patch_name: str, mode: Literal["sdr", "hdr10"]) -> tuple[float, float, float]:
+def _gamma_target_xyY(patch_name: str, mode: Literal["sdr", "hdr10"], gamma: float) -> tuple[float, float, float]:
+    """Target for a patch on a display of `gamma` instead of 2.2: each channel's
+    linear level is (code / 255) ** gamma for the patch's 8-bit code (HDR10
+    patches share the SDR codes' relative luminances). Full-on/off channels —
+    white, primaries, secondaries — are unchanged."""
+    codes = _PATCH_RGB[patch_name]
+    if codes[0] == codes[1] == codes[2]:
+        return (*_D65_WHITE_xy, (codes[0] / 255.0) ** gamma * 100.0)
+    primaries = _SDR_PRIMARIES_xyY if mode == "sdr" else _HDR10_PRIMARIES_xyY
+    prim_xyz = [xyY_to_XYZ(*primaries[c]) for c in ("red", "green", "blue")]
+    lin = [(c / 255.0) ** gamma for c in codes]
+    X, Y, Z = (sum(l * p[i] for l, p in zip(lin, prim_xyz)) for i in range(3))
+    return XYZ_to_xyY(X, Y, Z)
+
+
+def get_target_xyY(
+    patch_name: str, mode: Literal["sdr", "hdr10"], gamma: float | None = None
+) -> tuple[float, float, float]:
     """Return the xyY calibration target for a patch in the given mode.
 
     Args:
@@ -213,6 +230,10 @@ def get_target_xyY(patch_name: str, mode: Literal["sdr", "hdr10"]) -> tuple[floa
         KeyError: if patch_name is not in the target table for the given mode
     """
     table = _SDR_TARGETS_xyY if mode == "sdr" else _HDR10_TARGETS_xyY
+    if gamma is not None and abs(gamma - _GAMMA) > 1e-9 and patch_name in table:
+        if _PATCH_RGB[patch_name] in ((255, 255, 255), (0, 0, 0)):
+            return table[patch_name]
+        return _gamma_target_xyY(patch_name, mode, gamma)
     if patch_name not in table:
         raise KeyError(
             f"Unknown patch '{patch_name}' for mode '{mode}'. "
@@ -221,7 +242,9 @@ def get_target_xyY(patch_name: str, mode: Literal["sdr", "hdr10"]) -> tuple[floa
     return table[patch_name]
 
 
-def get_target_lab(patch_name: str, mode: Literal["sdr", "hdr10"]) -> tuple[float, float, float]:
+def get_target_lab(
+    patch_name: str, mode: Literal["sdr", "hdr10"], gamma: float | None = None
+) -> tuple[float, float, float]:
     """Return the Lab calibration target for a patch in the given mode (D65 illuminant).
 
     Args:
@@ -237,7 +260,7 @@ def get_target_lab(patch_name: str, mode: Literal["sdr", "hdr10"]) -> tuple[floa
     # Target xyY is already relative to white = 100 — convert directly.
     # (Do NOT rescale each patch to Y=100: that would make every target as
     # bright as white, e.g. red would get L*=100 instead of ~53.)
-    x, y, Y = get_target_xyY(patch_name, mode)
+    x, y, Y = get_target_xyY(patch_name, mode, gamma)
     X, Y, Z = xyY_to_XYZ(x, y, Y)
     return xyz_to_lab(X, Y, Z)
 

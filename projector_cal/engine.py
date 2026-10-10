@@ -270,6 +270,8 @@ class CalibrationEngine:
         self._tone: list[tuple[float, float]] | None = None
         self._hdr_dark_ref: float | None = None
         self._hdr_clip_ref: float | None = None
+        # Room-light floor (absolute XYZ) subtracted from every reading
+        self._ambient: tuple[float, float, float] | None = None
 
     def on_event(self, event: dict) -> None:
         """Forward an event, tracking projector changes for passes and the report."""
@@ -313,6 +315,8 @@ class CalibrationEngine:
             delta_e_threshold=self.config.delta_e_threshold,
         )
         report.baseline = self._phase0_baseline()
+        if self.config.ambient_compensation and not self._abort:
+            self._measure_ambient()
 
         # Levels, WB and gamma each move the others: repeat them until a pass
         # makes no change. Guided levels only prompt the user on the first pass.
@@ -626,7 +630,7 @@ class CalibrationEngine:
             return yn - y0
 
         white = self._measure_patch(self._grey_patch(255))[1]
-        ideal = (_NEAR_BLACK_CODE / 255) ** 2.2 * white
+        ideal = (_NEAR_BLACK_CODE / 255) ** self.config.target_gamma * white
         start = current = int(self.projector.get_setting("BRIGHT"))
 
         def ok(d: float) -> bool:
@@ -737,7 +741,7 @@ class CalibrationEngine:
         if self.mode == "hdr10":
             self._tune_contrast_hdr(span)
             return
-        expected = (_NEAR_WHITE_CODE / 255) ** 2.2
+        expected = (_NEAR_WHITE_CODE / 255) ** self.config.target_gamma
 
         def clean() -> bool:
             w = self._measure_patch(self._grey_patch(255))
@@ -754,7 +758,10 @@ class CalibrationEngine:
         start = int(self.projector.get_setting("CONTRAST"))
         current = start
         if not clean():
-            for _ in range(3 * span):        # already clipping: back off
+            # Already clipping: back off until clean, however far — the clip
+            # point depends on the signal path (192 was clean over the Pi's RGB,
+            # ~116 over YCbCr 4:2:2 through the AVR, 2026-10-10)
+            for _ in range(256):
                 moved = self._step_setting("CONTRAST", -1)
                 if moved == current or self._abort:
                     break
@@ -1142,7 +1149,8 @@ class CalibrationEngine:
                 self.projector.set_setting("GAMMA", picture.GAMMA_CUSTOM)
 
         tones = list(range(picture.GAMMA_POINTS))
-        target_L = np.array([get_target_lab(f"grey{g}", self.mode)[0] for g in greys])
+        target_L = np.array([get_target_lab(f"grey{g}", self.mode, self.config.target_gamma)[0]
+                             for g in greys])
 
         def read_tones() -> np.ndarray:
             return np.array([int(self.projector.get_setting("GAMMALV", f"{t:02d}")) for t in tones], float)
@@ -1293,7 +1301,7 @@ class CalibrationEngine:
         """
         cfg = self.config
         menu = self.cms_menu
-        target_lab = get_target_lab(axis, self.mode)
+        target_lab = get_target_lab(axis, self.mode, self.config.target_gamma)
         gains = dict(_CMS_INITIAL_GAIN)
         offsets = {c: 0 for c in _CMS_CONTROLS}
         best_de, best, worse_streak = float("inf"), dict(offsets), 0
@@ -1336,7 +1344,7 @@ class CalibrationEngine:
                 target = targets[p]
                 if chroma_only:
                     # Same chromaticity as the target, at the measured luminance
-                    x, y, _ = get_target_xyY(p, self.mode)
+                    x, y, _ = get_target_xyY(p, self.mode, self.config.target_gamma)
                     target = xyz_to_lab(*xyY_to_XYZ(x, y, rel[1]))
                 d = delta_e_2000(lab, target)
                 self.on_event({"event": "measurement", "patch": p, "xyz": list(xyz), "delta_e": d})
@@ -1548,7 +1556,7 @@ class CalibrationEngine:
         """Lab target for a patch. In HDR10 the projector tone-maps PQ, so the
         target keeps its chromaticity but takes the luminance the measured tone
         curve gives its stimulus (white = 100) — not the SDR gamma ratio."""
-        lab = get_target_lab(name, self.mode)
+        lab = get_target_lab(name, self.mode, self.config.target_gamma)
         if self.mode != "hdr10" or not self._tone or name == "white":
             return lab
         x, y, Y = get_target_xyY(name, self.mode)
@@ -1581,6 +1589,28 @@ class CalibrationEngine:
             level = pq_code10((code8 / 255) ** 2.2 * self.config.hdr_white_nits)
             return RGBPatch(level, level, level, bits=10)
         return RGBPatch(code8, code8, code8)
+
+    def _measure_ambient(self) -> None:
+        """Measure the black patch as the room-light floor; from now on every
+        reading is the projector's own light (reading − floor).
+
+        With room lights on the floor is mostly reflected room light (lit room,
+        2026-10-10: 0.87 cd/m² of a 37 cd/m² white, warm-tinted) — matching
+        greys to the targets with it included would crush the shadows chasing
+        levels below the floor, and pull the greys' tint against the lamp's.
+        """
+        raw = self.measure
+        self.display.display_patch(self._grey_patch(0))
+        floor = raw()
+        self._ambient = floor
+
+        def without_ambient() -> tuple[float, float, float]:
+            X, Y, Z = raw()
+            return (max(X - floor[0], 0.0), max(Y - floor[1], 0.0), max(Z - floor[2], 0.0))
+
+        self.measure = without_ambient
+        logger.info("Ambient floor XYZ %.3f %.3f %.3f subtracted from every reading", *floor)
+        self.on_event({"event": "ambient", "xyz": list(floor)})
 
     def _measure_white_reference(self) -> None:
         """Measure the white patch to anchor relative colorimetry (white = 100)."""
