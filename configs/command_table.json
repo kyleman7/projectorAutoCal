@@ -7,6 +7,6 @@
   },
   "picture_mode": {
     "sdr":   [["DYNRANGE", "01"], ["CMODE", "07"]],
-    "hdr10": [["CMODE", "15"], ["LUMINANCE", "00"], ["DYNRANGE", "02"]]
+    "hdr10": [["CMODE", "07"], ["LUMINANCE", "00"], ["GAMMA", "22"], ["DYNRANGE", "02"]]
   }
 }
