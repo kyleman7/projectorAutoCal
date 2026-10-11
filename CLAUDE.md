@@ -98,6 +98,11 @@ D:\projectorAutoCal\
 - The projector pushes unsolicited `IMEVENT=… \r:` notices (power/signal changes) over the
   network link; `_reply()` strips them, or every later reply arrives one command late
 - Always sleep `command_settle_ms` (default 200ms) after each SET
+- Settings writes return `ERR` while the projector has no input signal. During a run
+  (`ProjectorClient.signal_wait_s`, set by the server to 600 s) an `ERR` triggers `SIGNAL?`; if it
+  reads `00` the driver waits for the signal, settles 5 s and retries once. Through the AVR + HDFury
+  Linker the link relocks ~30 s after any Pi output change and occasionally drops mid-run (an AVR
+  power cycle restores it). Outside runs the wait is off, so a probe never stalls
 
 ### ESC/VP21 Command Tokens
 
