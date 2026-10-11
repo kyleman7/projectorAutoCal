@@ -45,6 +45,8 @@ _ENCODING = "ascii"
 # network link, e.g. "IMEVENT=0001 03 00000002 00000000 T1 F1\r:". Left in the
 # buffer they are read as the reply to the next command, and every later reply
 # arrives one command late.
+_SIGNAL_POLL_S = 5.0
+_SIGNAL_SETTLE_S = 5.0
 _EVENT_RE = re.compile(r"IMEVENT=[^:]*:\s*")
 
 
@@ -338,6 +340,11 @@ class ProjectorClient:
         self._transport = transport
         self.command_settle_ms = command_settle_ms
         self._command_table: dict = command_table or {}
+        # Seconds to wait for the input signal to come back when a command is
+        # rejected because it dropped (0 = fail at once). Calibration runs set
+        # it: settings writes ERR with no signal, and the HDMI chain (AVR +
+        # HDFury Linker) drops and relocks mid-run
+        self.signal_wait_s = 0.0
 
     # ------------------------------------------------------------------
     # Constructors
@@ -439,6 +446,8 @@ class ProjectorClient:
         payload = f"{command} {parameter}\r".encode(_ENCODING)
         logger.debug("SET  %s %s", command, parameter)
         response = self._send_raw(payload, retry=retry)
+        if "ERR" in response and retry and self._signal_returned():
+            response = self._send_raw(payload, retry=retry)
         if "ERR" in response:
             raise ProjectorError(
                 f"Projector rejected command '{command} {parameter}': {response}"
@@ -446,12 +455,39 @@ class ProjectorClient:
         if self.command_settle_ms > 0:
             time.sleep(self.command_settle_ms / 1000.0)
 
+    def _signal_returned(self) -> bool:
+        """After an ERR: if the input signal is gone, wait up to `signal_wait_s`
+        for it to return. True when it did (the caller retries once); False when
+        the signal was never lost, waiting is off, or it stayed away."""
+        if self.signal_wait_s <= 0:
+            return False
+        try:
+            if self._send_query("SIGNAL") != "00":
+                return False
+        except ProjectorError:
+            return False
+        logger.warning("Projector lost its input signal; waiting up to %.0f s for it", self.signal_wait_s)
+        deadline = time.monotonic() + self.signal_wait_s
+        while time.monotonic() < deadline:
+            time.sleep(_SIGNAL_POLL_S)
+            try:
+                if self._send_query("SIGNAL") != "00":
+                    time.sleep(_SIGNAL_SETTLE_S)  # picture and settings come back after lock
+                    logger.warning("Projector signal is back; retrying")
+                    return True
+            except ProjectorError:
+                pass
+        logger.error("Projector signal did not return within %.0f s", self.signal_wait_s)
+        return False
+
     def _send_query(self, command: str, param: str | None = None) -> str:
         """Send QUERY (``CMD?`` or ``CMD? PARAM``); return VALUE or raise ProjectorError on ERR."""
         query = f"{command}?" if param is None else f"{command}? {param}"
         payload = f"{query}\r".encode(_ENCODING)
         logger.debug("GET  %s", query)
         response = self._send_raw(payload)
+        if "ERR" in response and command != "SIGNAL" and self._signal_returned():
+            response = self._send_raw(payload)
         if "ERR" in response:
             raise ProjectorError(
                 f"Projector rejected query '{query}': {response}"

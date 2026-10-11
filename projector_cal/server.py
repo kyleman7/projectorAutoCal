@@ -249,6 +249,9 @@ class RunRequest(BaseModel):
 # automatic detection (00, and the undocumented 10 seen in the field) decoded
 # the Pi's SDR signal as HDR — highlights clipped from ~66% — so SDR runs force
 # 01 and the previous value is restored afterwards.
+# How long a run waits for a lost input signal before giving up
+_RUN_SIGNAL_WAIT_S = 600.0
+
 _RUN_DYNRANGE = {"sdr": "01", "hdr10": "05"}
 
 
@@ -326,6 +329,8 @@ async def start_run(body: RunRequest) -> dict:
                 proj_cfg, command_table=_state.command_table
             )
             projector.connect()
+            # Ride out HDMI drops (AVR/Linker relock) instead of failing the run
+            projector.signal_wait_s = _RUN_SIGNAL_WAIT_S
             # Dry runs must not mutate projector state — skip the mode switch,
             # but say so when the projector will decode the patches wrongly
             if not body.dry_run:
