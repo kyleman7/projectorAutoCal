@@ -11,3 +11,4 @@ profiles/*.json
 discovery/last_scan.json
 calibration_results*.json
 configs/ai_settings.json
+reports/*.json

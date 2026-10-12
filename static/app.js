@@ -74,6 +74,7 @@ document.querySelectorAll('nav button').forEach(btn => {
     btn.classList.add('active');
     document.getElementById('view-' + btn.dataset.view).classList.add('active');
     if (btn.dataset.view === 'profiles') loadProfiles();
+    if (btn.dataset.view === 'results') loadReports();
     if (btn.dataset.view === 'run') refreshSetupStatus().then(renderRunReadiness);
   });
 });
@@ -288,6 +289,10 @@ function handleEvent(ev) {
 
     case 'phase_done':
       logLine(`✓ Phase ${ev.phase} complete`, 'log-info');
+      break;
+
+    case 'report_saved':
+      loadReports(ev.filename);
       break;
 
     case 'run_complete':
@@ -907,6 +912,48 @@ function renderResults(report) {
     '<div class="flex align-center gap-8"><span class="spinner"></span><span class="text-dim">Analyzing results…</span></div>';
 }
 
+// ---------------------------------------------------------------------------
+// Saved reports + charts (charts.js draws them)
+// ---------------------------------------------------------------------------
+
+const MODE_NAMES = { sdr: 'SDR', hdr10: 'HDR10' };
+
+async function loadReports(selectFile = null) {
+  const select = document.getElementById('report-select');
+  const body = document.getElementById('report-body');
+  let list;
+  try {
+    list = await (await fetch('/api/reports')).json();
+  } catch (e) {
+    body.innerHTML = `<div class="text-dim">Could not load reports: ${e}</div>`;
+    return;
+  }
+  if (!list.length) {
+    select.innerHTML = '';
+    body.innerHTML = '<div class="text-dim">No saved reports yet — every finished run saves one here.</div>';
+    return;
+  }
+  const keep = selectFile || select.value;
+  select.innerHTML = list.map(r => {
+    const when = (r.saved_at || '').replace('T', ' ').slice(0, 16);
+    const tags = [r.dry_run ? 'dry run' : '', r.aborted ? 'aborted' : ''].filter(Boolean).join(', ');
+    const de = r.mean_de === null ? '' : ` — mean ΔE ${r.mean_de.toFixed(2)}`;
+    return `<option value="${r.filename}">${when} · ${MODE_NAMES[r.mode] || r.mode}${de}${tags ? ` (${tags})` : ''}</option>`;
+  }).join('');
+  select.value = list.some(r => r.filename === keep) ? keep : list[0].filename;
+  showReport(select.value);
+}
+
+async function showReport(filename) {
+  const body = document.getElementById('report-body');
+  const res = await fetch('/api/reports/' + encodeURIComponent(filename));
+  if (!res.ok) {
+    body.innerHTML = '<div class="text-dim">Report not found.</div>';
+    return;
+  }
+  renderReport(body, (await res.json()).chart);
+}
+
 function renderAIAnalysis(result) {
   if (result.error) {
     document.getElementById('ai-analysis-content').innerHTML =
@@ -1122,6 +1169,9 @@ connectWS();
 loadAISettings();
 loadConfigIntoFields();
 refreshSetupStatus();
+
+// A tab name in the URL (/#results) opens that tab — bookmarkable
+document.querySelector(`nav button[data-view="${location.hash.slice(1)}"]`)?.click();
 
 // Load last discovery results on startup
 fetch('/api/discover/last').then(r => r.json()).then(data => {

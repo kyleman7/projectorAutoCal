@@ -578,3 +578,78 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   color: var(--success);
   background: rgba(62, 207, 112, 0.08);
 }
+
+/* ---- Calibration report charts (charts.js) ---- */
+
+.report-head { gap: 12px; flex-wrap: wrap; }
+#report-select { max-width: 100%; min-width: 0; }
+
+.stat-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.stat-tile {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+}
+.stat-label { font-size: 12px; color: var(--text-dim); }
+.stat-value { font-size: 26px; font-weight: 600; line-height: 1.3; font-variant-numeric: tabular-nums; }
+.stat-sub { font-size: 12px; color: var(--text-dim); }
+.group-means { font-size: 13px; margin-bottom: 16px; }
+
+.chart-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 440px), 1fr));
+  gap: 16px;
+}
+.chart-card {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px;
+  min-width: 0;
+}
+.chart-card.wide { grid-column: 1 / -1; }
+.chart-head { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 8px; }
+.chart-title { font-size: 14px; font-weight: 600; }
+.chart-sub { font-size: 12px; color: var(--text-dim); }
+.chart-legend { display: flex; gap: 12px; font-size: 12px; color: var(--text-dim); align-items: center; flex-wrap: wrap; }
+.chart-legend i { display: inline-block; width: 14px; height: 2px; margin-right: 5px; vertical-align: middle; }
+details.chart-card summary { cursor: pointer; }
+
+.chart-svg { width: 100%; height: auto; display: block; overflow: visible; }
+.chart-svg text { fill: var(--text-dim); font-size: 11px; font-family: var(--font); }
+.chart-svg .axis-label { font-size: 12px; }
+.gridlines line { stroke: var(--border); stroke-width: 1; }
+.chart-svg .gridlines line.v { stroke-opacity: 0.5; }
+.chart-svg .locus { stroke: var(--text-dim); stroke-width: 1.5; fill: rgba(136,144,168,0.06); }
+.chart-svg .target-gamut { stroke: var(--text); stroke-width: 1.5; stroke-dasharray: 5 4; fill: none; }
+.chart-svg .target-ring { fill: none; stroke: var(--text); stroke-width: 1.5; }
+.chart-svg .err-line { stroke: var(--text-dim); stroke-width: 1; }
+.chart-svg .dot { stroke: var(--bg-input); stroke-width: 2; }
+.chart-svg .dot:hover, .chart-svg .bar:hover { stroke: var(--text); }
+.chart-svg .ref-line { stroke: var(--text-dim); stroke-width: 1; stroke-dasharray: 3 3; }
+.chart-svg .target-line { stroke: var(--text-dim); stroke-width: 2; stroke-dasharray: 6 4; fill: none; }
+.chart-svg .bar { stroke: var(--bg-input); stroke-width: 1; }
+.chart-svg .de-line-1 { stroke: var(--success); stroke-width: 1; stroke-dasharray: 4 3; }
+.chart-svg .de-line-3 { stroke: var(--warning); stroke-width: 1; stroke-dasharray: 4 3; }
+.chart-svg .bar-label { font-size: 10px; }
+.chart-svg .group-label { fill: var(--text); font-size: 11px; }
+.chart-svg .group-sep { stroke: var(--border); }
+
+.table-scroll { overflow-x: auto; margin-top: 10px; }
+.measure-table { font-variant-numeric: tabular-nums; }
+.measure-table .swatch {
+  display: inline-block; width: 10px; height: 10px; border-radius: 2px;
+  margin-right: 8px; vertical-align: middle; border: 1px solid var(--border);
+}
+
+.chart-tip {
+  position: fixed; display: none; pointer-events: none; z-index: 1000;
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-sm);
+  box-shadow: var(--shadow); padding: 6px 9px; font-size: 12px; line-height: 1.5; color: var(--text);
+}

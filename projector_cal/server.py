@@ -25,7 +25,7 @@ from pydantic import BaseModel
 
 from .config import ConfigError, load_command_table, load_config, load_config_from_dict
 from .discovery import NetworkDiscovery
-from .engine import PHASES, CalibrationEngine, CalibrationReport
+from .engine import PHASES, CalibrationEngine, CalibrationReport, _report_to_dict
 from .osd import RgbcmyMenu
 from .pgen import NullPatchDisplay, PGenClient, PGenError, RGBPatch
 from .profiles import (
@@ -38,11 +38,13 @@ from .profiles import (
     save_profile,
 )
 from .projector import ProjectorClient, ProjectorError
+from .reports import ReportNotFound, delete_report, list_reports, load_report, save_report
 
 logger = logging.getLogger(__name__)
 
 _STATIC_DIR = Path(__file__).parent.parent / "static"
 _PROFILES_DIR = Path(__file__).parent.parent / "profiles"
+_REPORTS_DIR = Path(__file__).parent.parent / "reports"
 _AI_SETTINGS_PATH = Path(__file__).parent.parent / "configs" / "ai_settings.json"
 
 app = FastAPI(title="ProjectorCal", version="0.1.0")
@@ -416,6 +418,12 @@ async def start_run(body: RunRequest) -> dict:
 
             phases = body.phases or (PHASES if body.phase == "all" else [body.phase])
             report = engine.run(phases)
+            if report.verify_results:
+                try:
+                    path = save_report(_report_to_dict(report), _REPORTS_DIR, dry_run=body.dry_run)
+                    _state.broadcast_event({"event": "report_saved", "filename": path.name})
+                except OSError:
+                    logger.exception("Could not save the run report")
 
             if _state.ai_enabled and not report.aborted:
                 try:
@@ -578,6 +586,32 @@ async def apply_profile_endpoint(filename: str) -> dict:
             return {"ok": True, "failed": failed}
     except ProjectorError as e:
         raise HTTPException(500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Saved run reports (Results tab charts)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/reports")
+async def get_reports() -> list[dict]:
+    return list_reports(_REPORTS_DIR)
+
+
+@app.get("/api/reports/{filename}")
+async def get_report(filename: str) -> dict:
+    try:
+        return load_report(filename, _REPORTS_DIR)
+    except ReportNotFound:
+        raise HTTPException(404, detail="Report not found")
+
+
+@app.delete("/api/reports/{filename}")
+async def delete_report_endpoint(filename: str) -> dict:
+    try:
+        delete_report(filename, _REPORTS_DIR)
+    except ReportNotFound:
+        raise HTTPException(404, detail="Report not found")
+    return {"ok": True}
 
 
 @app.post("/api/memory/{slot}/{action}")

@@ -19,7 +19,7 @@
   <nav>
     <button class="active" data-view="setup">Setup</button>
     <button data-view="run">Run</button>
-    <button data-view="results">Before / After</button>
+    <button data-view="results">Results</button>
     <button data-view="profiles">Profiles</button>
   </nav>
 
@@ -442,11 +442,22 @@
     <div id="view-results" class="view">
 
       <div class="card">
+        <div class="flex justify-between align-center mb-16 report-head">
+          <div class="card-title" style="margin:0">Calibration Report</div>
+          <select id="report-select" onchange="showReport(this.value)" aria-label="Saved report"></select>
+        </div>
+        <div id="report-body">
+          <div class="text-dim">Loading saved reports…</div>
+        </div>
+      </div>
+
+      <div class="card">
         <div class="flex justify-between align-center mb-16">
-          <div class="card-title" style="margin:0">Calibration Results</div>
+          <div class="card-title" style="margin:0">Before / After (last run)</div>
           <button class="btn btn-sm" onclick="downloadResults()">Download JSON</button>
         </div>
 
+        <div class="table-scroll">
         <table>
           <thead>
             <tr>
@@ -459,10 +470,11 @@
           </thead>
           <tbody id="results-table-body">
             <tr><td colspan="5" class="text-dim" style="text-align:center; padding:24px">
-              Run a calibration to see results
+              Run a calibration to see this run's before/after
             </td></tr>
           </tbody>
         </table>
+        </div>
       </div>
 
       <!-- AI Analysis -->
@@ -526,6 +538,7 @@
   </main>
 </div><!-- /#app -->
 
+<script src="/static/charts.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

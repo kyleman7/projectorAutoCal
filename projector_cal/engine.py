@@ -159,6 +159,8 @@ class CalibrationReport:
     mode: Literal["sdr", "hdr10"]
     phase: str                     # "all" or the comma-joined phases that ran
     delta_e_threshold: float
+    target_gamma: float = 2.2      # grey/sweep targets (lights-on runs use e.g. 2.0)
+    ambient_compensation: bool = False   # readings have the room-light floor subtracted
     baseline: dict[str, str] = field(default_factory=dict)   # settings before the run
     wb_result: PatchResult | None = None                      # gains, on white
     wb_offset_result: PatchResult | None = None               # offsets, on a dark grey
@@ -313,6 +315,8 @@ class CalibrationEngine:
             mode=self.mode,
             phase="all" if set(phases) == set(PHASES) else ",".join(p for p in PHASES if p in phases),
             delta_e_threshold=self.config.delta_e_threshold,
+            target_gamma=self.config.target_gamma,
+            ambient_compensation=self.config.ambient_compensation,
         )
         report.baseline = self._phase0_baseline()
         if self.config.ambient_compensation and not self._abort:
@@ -1805,6 +1809,8 @@ def _report_to_dict(report: CalibrationReport) -> dict:
         "mode": report.mode,
         "phase": report.phase,
         "delta_e_threshold": report.delta_e_threshold,
+        "target_gamma": report.target_gamma,
+        "ambient_compensation": report.ambient_compensation,
         "total_iterations": report.total_iterations,
         "converged_patches": report.converged_patches,
         "aborted": report.aborted,

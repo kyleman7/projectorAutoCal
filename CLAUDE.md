@@ -27,10 +27,12 @@ D:\projectorAutoCal\
 │   ├── ccss/                      ← colorimeter spectral corrections (see its README)
 │   └── command_table.json         ← ESC/VP21 token map (populated by --probe)
 ├── profiles/                      ← saved calibration profiles (JSON, gitignored)
+├── reports/                       ← saved run reports, one per finished run (JSON, gitignored)
 ├── discovery/                     ← last_scan.json cache (gitignored)
 ├── static/
 │   ├── index.html                 ← 4-tab SPA shell
 │   ├── app.js                     ← all client-side logic
+│   ├── charts.js                  ← Results-tab report charts (plain SVG, no libraries)
 │   └── styles.css                 ← dark theme
 ├── projector_cal/
 │   ├── __init__.py                ← __version__ = "0.1.0"
@@ -46,6 +48,7 @@ D:\projectorAutoCal\
 │   ├── picture.py                 ← picture-setting registry: snapshot/restore/neutralize/nudge
 │   ├── osd.py                     ← RGBCMY menu driver (remote-key presses) for automatic CMS
 │   ├── profiles.py                ← save/load/apply/list/delete profiles (full settings snapshot)
+│   ├── reports.py                 ← saved run reports + chart data (xyY, RGB balance, point gamma)
 │   ├── discovery.py               ← mDNS + parallel port scan
 │   ├── server.py                  ← FastAPI app, REST + WebSocket
 │   └── agents/
@@ -492,6 +495,7 @@ All engine events are broadcast as JSON objects. Key events:
    // patch_done delta_e is null when the patch was never measured (aborted run)
 {"event": "phase_done",     "phase": "wb"}
 {"event": "run_complete",   "report": {...}}
+{"event": "report_saved",   "filename": "sdr_20261011_025423.json"}   // after run_complete, if verify ran
 {"event": "error",          "message": "..."}
 {"event": "warning",        "message": "..."}   // non-fatal; the run continues
 {"event": "probe_progress", "message": "WB.R: found 'WBALGAINR' = 128"}
@@ -522,6 +526,9 @@ All engine events are broadcast as JSON objects. Key events:
 | POST   | `/api/profiles` | Save current projector state as profile |
 | DELETE | `/api/profiles/{filename}` | Delete a profile |
 | POST   | `/api/profiles/{filename}/apply` | Apply profile to projector |
+| GET    | `/api/reports` | Saved run reports, newest first, with mean/max ΔE |
+| GET    | `/api/reports/{filename}` | One report + `chart` (rows, summary, final settings) |
+| DELETE | `/api/reports/{filename}` | Delete a saved report |
 | POST   | `/api/memory/{slot}/{save\|recall}` | Projector Memory 1–10: `PUSHMEM 02 xx` / `POPMEM 02 xx` (slot in hex) |
 | POST   | `/api/profiles/compare` | AI comparison of two profiles (`{a: filename, b: filename}`) |
 | POST   | `/api/discover` | Start mDNS + port scan |
@@ -694,11 +701,16 @@ python -m projector_cal
 
 ## Web UI — 4 Tabs
 
+Every finished run with a verify pass is saved to `reports/<mode>_<YYYYmmdd_HHMMSS>.json`
+(`{saved_at, dry_run, report}`); the report records `target_gamma` and `ambient_compensation`
+so its chart targets match the run. Chart marks for dark greys are lifted to stay visible on
+the dark theme; the table swatch keeps the true colour.
+
 | Tab | Key features |
 |-----|-------------|
 | **Setup** | Guided flow: workflow progress strip, then numbered steps — 1 connections (Save & Test persists fields via POST /api/config; the run reads the saved config, not the fields), 2 command probe, 3 screen info (optional), 4 placement checklist, 5 warm-up + pre-flight validation; AI settings card at the bottom. Step checkmarks driven by GET /api/setup/status + client state |
 | **Run** | Readiness banner (warns if command table unprobed or colorimeter unavailable on host), mode/phase selector with first-run guidance, dry-run toggle, start/stop (Start re-saves Setup fields first), guided levels card (instructions, −/+ per control, Done), guided-CMS card (instructions + Re-measure / Accept & next), patch grid (white, colors, grey ramp) with live ΔE, progress bar, live log |
-| **Before/After** | ΔE comparison table (before = initial ΔE, after = verify pass), AI Analysis card (grade + issues + recommendations) |
+| **Results** | Calibration Report: pick any saved run (`reports/`); stat tiles, CIE 1931 gamut, grey RGB balance, gamma (HDR: tone tracking), luminance tracking, ΔE per patch, measurement table — all from the verify pass, computed by `reports.chart_data`, hover tooltips. Then the last run's before/after ΔE table and the AI Analysis card. `/#results` (any tab name) opens that tab |
 | **Profiles** | Grouped by mode, apply/delete buttons, save-current-state (full picture-settings snapshot; apply restores it in dependency order — CMODE first, GAMMA before GAMMALV), projector Memory 1–10 save/recall, AI profile comparison |
 
 All tabs receive real-time updates via WebSocket (`/ws`).
